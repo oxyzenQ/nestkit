@@ -110,11 +110,11 @@ created:
 - `bash -n check.sh version-to.sh` passes syntax validation.
 - No regression against the previous stable release for any existing command.
 
-The major release design plan is documented in [ROADMAP.md](ROADMAP.md) and
-[docs/v5.md](docs/v5.md).
+The major release design plan is documented in [ROADMAP-current.md](ROADMAP-current.md) and
+[v5.md](v5.md).
 
 ## Version Bumps
 
 Version bumps must use the `./scripts/version-to.sh vX.Y.Z` script, which updates
-`Cargo.toml`, `Cargo.lock`, `README.md`, `workflow/about-ci.md`, and the AUR
+`Cargo.toml`, `Cargo.lock`, `README.md`, `docs/workflow/about-ci.md`, and the AUR
 metadata in a single, consistent pass. Manual version edits are prohibited.

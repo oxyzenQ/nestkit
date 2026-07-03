@@ -44,15 +44,15 @@ yay -S zejtron-bin
 ### GitHub Release
 
 ```sh
-TAG=v5.0.1
-curl -LO "https://github.com/oxyzenQ/zejtron/releases/download/${TAG}/zejtron-bin-${TAG}-linux-x86_64.tar.gz"
-curl -LO "https://github.com/oxyzenQ/zejtron/releases/download/${TAG}/zejtron-bin-${TAG}-linux-x86_64.tar.gz.sha512sum"
-sha512sum --check "zejtron-bin-${TAG}-linux-x86_64.tar.gz.sha512sum"
-tar -xzf "zejtron-bin-${TAG}-linux-x86_64.tar.gz"
+TAG=v10.0.0
+curl -LO "https://github.com/oxyzenQ/zejtron/releases/download/${TAG}/zejtron-bin-${TAG}-linux-amd64-gnu.tar.gz"
+curl -LO "https://github.com/oxyzenQ/zejtron/releases/download/${TAG}/zejtron-bin-${TAG}-linux-amd64-gnu.tar.gz.sha512sum"
+sha512sum --check "zejtron-bin-${TAG}-linux-amd64-gnu.tar.gz.sha512sum"
+tar -xzf "zejtron-bin-${TAG}-linux-amd64-gnu.tar.gz"
 install -Dm755 zejtron "$HOME/.local/bin/zejtron"
 ```
 
-For aarch64 Linux, use `zejtron-bin-${TAG}-linux-aarch64.tar.gz`.
+For a statically-linked musl build, replace `linux-amd64-gnu` with `linux-amd64-musl`.
 
 ### From Source
 
@@ -246,7 +246,7 @@ zejtron git
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for the project roadmap and design direction.
+See [docs/ROADMAP.md](docs/ROADMAP.md) for the project roadmap and design direction, or [docs/ROADMAP-current.md](docs/ROADMAP-current.md) for the current design document.
 
 ## Migration
 
@@ -260,6 +260,21 @@ SKIP_CODESPELL=1 ./scripts/build.sh
 ./scripts/version-to.sh vX.Y.Z
 ```
 
-## Trademark
+## Intellectual Property & Trademark
 
-The source code is licensed under the GNU General Public License v3.0 (GPL-3.0-only). The Zejtron name and branding are not granted under the GPL-3.0-only license. See [TRADEMARK.md](TRADEMARK.md).
+**zejtron** is the exclusive intellectual property of
+**rezky_nightky (oxyzenQ)**.
+
+- Source code: licensed under **GPL-3.0-only** (see [LICENSE](LICENSE)).
+- Name, logo, and branding ("the Marks"): governed by
+  [TRADEMARK.md](TRADEMARK.md). The Marks are NOT covered by the GPL and
+  are reserved by the owner.
+- This project is **NOT for sale**. Unauthorized rebranding, relicensing,
+  or source-code theft is strictly prohibited.
+
+For trademark licensing or written permission, contact
+**rezky_nightky (oxyzenQ)** — https://github.com/oxyzenQ.
+
+---
+
+© 2026 rezky_nightky (oxyzenQ). All rights reserved.

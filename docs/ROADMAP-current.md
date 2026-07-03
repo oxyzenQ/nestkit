@@ -5,7 +5,7 @@ future Zejtron releases. Nothing here is implemented. This is a design-only
 reference to guide deliberate, disciplined development when the project exits
 stabilization mode.
 
-See [docs/v5.md](docs/v5.md) for the full v5.0.0 design specification.
+See [docs/v5.md](v5.md) for the full v5.0.0 design specification.
 
 ## Project Identity
 

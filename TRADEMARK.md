@@ -1,49 +1,59 @@
-# Zejtron Trademark Policy
+# zejtron Trademark & Intellectual Property
 
-The Zejtron source code is licensed under the GNU General Public License v3.0 (GPL-3.0-only). That license grants rights to use, copy, modify, and distribute the source code under its terms.
+**Owner:** rezky_nightky (oxyzenQ)
+**Repository:** https://github.com/oxyzenQ/zejtron
+**License:** GPL-3.0-only (source code)
 
-The GPL-3.0-only license does not grant rights to use the Zejtron name, logo, project identity, or branding in a way that suggests an official relationship, endorsement, or origin.
+## 1. Copyright & Ownership
 
-This policy applies to the names "Zejtron" and "zejtron", related logos or visual branding, and confusingly similar names or branding.
+zejtron — including its source code, logo, name, and all associated
+branding materials (collectively, the "Marks") — is the exclusive intellectual
+property of **rezky_nightky (oxyzenQ)**. The source code is licensed under the
+GNU General Public License v3 only (GPL-3.0-only). The Marks are NOT covered
+by the GPL and are reserved by the owner.
 
-## Official Project
+This project is NOT for sale. Source-code theft, rebranding, or
+re-distribution under a different license without the express written
+consent of rezky_nightky (oxyzenQ) is strictly prohibited.
 
-The official Zejtron repository is:
+## 2. Permitted Uses
 
-https://github.com/oxyzenQ/zejtron
+- Running zejtron from the official repository for personal or
+  internal use.
+- Forking the source code under the terms of GPL-3.0-only, provided the
+  fork is clearly renamed and does NOT use the zejtron Marks.
+- Redistributing unmodified official releases with attribution to
+  rezky_nightky (oxyzenQ).
 
-## Allowed Uses
+## 3. Uses Requiring Written Permission
 
-You may use the Zejtron name for truthful nominative or reference purposes, such as:
+- Using the zejtron name, logo, or branding in derivative or
+  competing products.
+- Commercial redistribution of zejtron under the zejtron brand.
+- Any use of the Marks that implies endorsement by, affiliation with, or
+  sponsorship by rezky_nightky (oxyzenQ) without prior written consent.
 
-- referring to the Zejtron project
-- linking to the official repository
-- describing compatibility with Zejtron
-- discussing, reviewing, or documenting Zejtron
+## 4. Forks & Derivatives
 
-You may package and redistribute official, unmodified Zejtron releases using the Zejtron name, provided the packaging does not imply a separate official relationship or endorsement beyond accurately identifying the upstream project.
+Forks of zejtron MUST:
 
-## Modified Versions And Forks
+- Use a different project name.
+- Use different branding (logo, color scheme, etc.).
+- Preserve the GPL-3.0-only license and copyright notice.
+- Clearly state that the fork is derived from zejtron but is NOT
+  zejtron and is NOT endorsed by rezky_nightky (oxyzenQ).
 
-If you modify Zejtron or distribute a fork, you must use a different name unless you have explicit permission from the project owner.
+## 5. Enforcement
 
-Modified versions must not be presented as official Zejtron releases. Names, package names, repository names, logos, descriptions, and documentation should make the unofficial nature clear.
+Unauthorized use of the zejtron Marks may result in takedown requests
+and legal action to protect the intellectual property.
 
-## Confusing Use
+## 6. Contact
 
-Do not use the Zejtron name, logo, or branding in a way that may confuse users about whether software, packages, services, websites, repositories, or documentation are official, endorsed, or maintained by the Zejtron project.
+For trademark licensing inquiries or written permission requests, contact:
+**rezky_nightky (oxyzenQ)** — https://github.com/oxyzenQ
 
-Examples of uses that require permission include:
+---
 
-- using Zejtron as the name of a modified fork
-- using Zejtron branding for an unofficial website or service
-- using a confusingly similar name for a related terminal toolkit
-- implying endorsement, sponsorship, or official status
-
-## No Registration Claim
-
-This policy does not claim that Zejtron is a registered trademark. It clarifies that the project name and branding are not licensed under the GNU General Public License v3.0 (GPL-3.0-only).
-
-## Permission
-
-For permission to use the Zejtron name or branding outside this policy, contact the project owner through the official repository or at `with dot rezky at gmail dot com`.
+© 2026 rezky_nightky (oxyzenQ). All rights reserved.
+zejtron and the zejtron logo are trademarks of rezky_nightky (oxyzenQ).

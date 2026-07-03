@@ -26,7 +26,7 @@ Maintenance workflow commits use:
 Release builds run for tags matching `v*`. The workflow builds:
 
 - `x86_64-unknown-linux-gnu`
-- `aarch64-unknown-linux-gnu`
+- `x86_64-unknown-linux-musl`
 
 Release archives use a flat layout:
 
@@ -37,11 +37,11 @@ Release archives use a flat layout:
 Example release asset flow:
 
 ```sh
-TAG=v5.0.1
+TAG=v10.0.0
 cargo build --release --locked --target x86_64-unknown-linux-gnu
 ```
 
-The release workflow uploads `zejtron-bin-${TAG}-linux-x86_64.tar.gz`, `zejtron-bin-${TAG}-linux-aarch64.tar.gz`, and matching `.sha512sum` files.
+The release workflow uploads `zejtron-bin-${TAG}-linux-amd64-gnu.tar.gz`, `zejtron-bin-${TAG}-linux-amd64-musl.tar.gz`, and matching `.sha512sum` files.
 
 ## AUR Sync
 
