@@ -4,7 +4,7 @@
 #
 # Uninstall script for zejtron.
 # Auto-detects and removes the binary from any of:
-#   /usr/bin/, /usr/local/bin/, ~/.local/bin/
+#   /usr/bin/, ~/.local/bin/
 # Sudo is used ONLY for system paths. Run WITHOUT sudo.
 
 set -uo pipefail
@@ -16,9 +16,9 @@ usage() {
     cat <<EOF
 Usage: $0 [--system|--user|--all]
 
-  (default)  Auto-detect: scan /usr/bin, /usr/local/bin, ~/.local/bin
+  (default)  Auto-detect: scan /usr/bin, ~/.local/bin
              and remove every ${zejtron} found. Sudo only for system paths.
-  --system   Remove only from /usr/bin and /usr/local/bin (uses sudo).
+  --system   Remove only from /usr/bin (uses sudo).
   --user     Remove only from ~/.local/bin (no sudo).
   --all      Same as default.
 
@@ -36,7 +36,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-SYSTEM_PATHS=(/usr/bin /usr/local/bin)
+SYSTEM_PATHS=(/usr/bin)
 USER_PATH="${HOME}/.local/bin"
 removed=0
 

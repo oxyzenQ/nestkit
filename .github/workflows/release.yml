@@ -132,7 +132,7 @@ jobs:
             ### Install
             ```bash
             tar xzf zejtron-*.tar.gz
-            sudo install -Dm755 zejtron /usr/local/bin/zejtron
+            sudo install -Dm755 zejtron /usr/bin/zejtron
             zejtron --version
             ```
 
