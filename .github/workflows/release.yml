@@ -123,30 +123,7 @@ jobs:
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
-          body: |
-            ## zejtron ${{ github.ref_name }}
-
-            Unified Linux introspection toolkit for paths, ports,
-            processes, files, services, and diagnostics.
-
-            ### Install
-            ```bash
-            tar xzf zejtron-*.tar.gz
-            sudo install -Dm755 zejtron /usr/bin/zejtron
-            zejtron --version
-            ```
-
-            ### What's new
-            See
-            [CHANGELOG.md](https://github.com/oxyzenQ/zejtron/blob/main/CHANGELOG.md)
-
-            ### Verify
-            ```bash
-            sha512sum -c zejtron-*.sha512sum
-            ```
-
-            ---
-            (c) 2026 rezky_nightky (oxyzenQ) - GPL-3.0-only
+          generate_release_notes: true
           prerelease: |-
             ${{ contains(github.ref_name, '-alpha.')
                || contains(github.ref_name, '-beta.')
