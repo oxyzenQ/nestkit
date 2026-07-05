@@ -1,12 +1,42 @@
 // SPDX-FileCopyrightText: 2026 rezky_nightky
 // SPDX-License-Identifier: GPL-3.0-only
 
-/// Map Rust's internal arch name to the project's user-facing label.
-/// `x86_64` -> `amd64`; all others pass through unchanged.
-fn arch_label() -> &'static str {
-    match std::env::consts::ARCH {
-        "x86_64" => "amd64",
-        other => other,
+/// Dynamic build target label: detects arch + libc env at compile time.
+/// Returns e.g. "linux-amd64-gnu" (glibc, dynamic) or "linux-amd64-musl"
+/// (static) for x86_64 Linux builds.
+fn build_label() -> &'static str {
+    if cfg!(all(
+        target_os = "linux",
+        target_arch = "x86_64",
+        target_env = "musl"
+    )) {
+        "linux-amd64-musl"
+    } else if cfg!(all(
+        target_os = "linux",
+        target_arch = "x86_64",
+        target_env = "gnu"
+    )) {
+        "linux-amd64-gnu"
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        "linux-amd64"
+    } else if cfg!(all(
+        target_os = "linux",
+        target_arch = "aarch64",
+        target_env = "musl"
+    )) {
+        "linux-aarch64-musl"
+    } else if cfg!(all(
+        target_os = "linux",
+        target_arch = "aarch64",
+        target_env = "gnu"
+    )) {
+        "linux-aarch64-gnu"
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        "linux-aarch64"
+    } else if cfg!(target_os = "macos") {
+        "darwin"
+    } else {
+        "unknown"
     }
 }
 
@@ -16,7 +46,7 @@ pub fn version_text(hash: &str) -> String {
     } else {
         hash.trim()
     };
-    let target = format!("{}-{}", std::env::consts::OS, arch_label());
+    let target = build_label();
 
     format!(
         "Version: v{}\n\
@@ -37,10 +67,9 @@ mod tests {
         assert_eq!(
             version_text("abc123"),
             format!(
-                "Version: v{}\nBuild: {}-{} (abc123)\nCopyright: (c) 2026 rezky_nightky (oxyzenQ)\nLicense: GPL-3.0-only\nSource: https://github.com/oxyzenQ/zejtron",
+                "Version: v{}\nBuild: {} (abc123)\nCopyright: (c) 2026 rezky_nightky (oxyzenQ)\nLicense: GPL-3.0-only\nSource: https://github.com/oxyzenQ/zejtron",
                 env!("CARGO_PKG_VERSION"),
-                std::env::consts::OS,
-                arch_label()
+                build_label()
             )
         );
     }
@@ -55,11 +84,22 @@ mod tests {
         assert_eq!(
             version_text("  "),
             format!(
-                "Version: v{}\nBuild: {}-{} (unknown)\nCopyright: (c) 2026 rezky_nightky (oxyzenQ)\nLicense: GPL-3.0-only\nSource: https://github.com/oxyzenQ/zejtron",
+                "Version: v{}\nBuild: {} (unknown)\nCopyright: (c) 2026 rezky_nightky (oxyzenQ)\nLicense: GPL-3.0-only\nSource: https://github.com/oxyzenQ/zejtron",
                 env!("CARGO_PKG_VERSION"),
-                std::env::consts::OS,
-                arch_label()
+                build_label()
             )
         );
+    }
+
+    #[test]
+    fn build_label_detects_libc_variant() {
+        let label = build_label();
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        {
+            assert!(
+                label.ends_with("-gnu") || label.ends_with("-musl"),
+                "build_label must include libc variant (-gnu/-musl), got: {label}"
+            );
+        }
     }
 }
