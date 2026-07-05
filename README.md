@@ -54,6 +54,9 @@ install -Dm755 zejtron "$HOME/.local/bin/zejtron"
 
 For a statically-linked musl build, replace `linux-amd64-gnu` with `linux-amd64-musl`.
 
+Each release also ships quantum-resistant checksums (BLAKE2b + SHAKE256).
+See [docs/VERIFY_RELEASE.md](docs/VERIFY_RELEASE.md) for full instructions.
+
 ### From Source
 
 ```sh
