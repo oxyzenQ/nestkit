@@ -110,6 +110,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Download all build artifacts
@@ -129,10 +130,26 @@ jobs:
             -exec cp {} release-assets/ \;
           ls -lh release-assets/
 
+      - name: Generate release body
+        run: |
+          PREV_TAG=$(git tag --sort=-creatordate | grep -v "^${GITHUB_REF_NAME}$" | head -1 || true)
+          {
+            if [ -n "$PREV_TAG" ]; then
+              echo "## What's Changed"
+              echo ""
+              git log --no-merges --pretty=format:'- %s (%h)' "${PREV_TAG}..${GITHUB_REF_NAME}"
+              echo ""
+            else
+              echo "Initial release."
+            fi
+          } > release-body.md
+          echo "=== Release body ==="
+          cat release-body.md
+
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          body_path: release-body.md
           prerelease: |-
             ${{ contains(github.ref_name, '-alpha.')
                || contains(github.ref_name, '-beta.')
