@@ -53,7 +53,7 @@ sed -i -E 's/^pkgrel=.*/pkgrel=1/' aur/zejtron-bin/PKGBUILD
 )
 
 sed -i -E 's/^TAG=v[0-9]+\.[0-9]+\.[0-9]+/TAG='"${TAG}"'/' README.md docs/workflow/about-ci.md
-sed -i -E 's#(zejtron-bin-)v[0-9]+\.[0-9]+\.[0-9]+(-linux-)#\1'"${TAG}"'\2#g' README.md docs/workflow/about-ci.md
+sed -i -E 's#(zejtron-)v[0-9]+\.[0-9]+\.[0-9]+(-linux-)#\1'"${TAG}"'\2#g' README.md docs/workflow/about-ci.md
 sed -i -E 's#(/download/)v[0-9]+\.[0-9]+\.[0-9]+/#\1'"${TAG}"'/#g' README.md docs/workflow/about-ci.md
 sed -i -E 's#(git tag -a )v[0-9]+\.[0-9]+\.[0-9]+#\1'"${TAG}"'#g' docs/workflow/about-ci.md
 sed -i -E 's#(git tag -a v[0-9]+\.[0-9]+\.[0-9]+ -m ")v[0-9]+\.[0-9]+\.[0-9]+(")#\1'"${TAG}"'\2#g' docs/workflow/about-ci.md

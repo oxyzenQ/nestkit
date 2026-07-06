@@ -71,7 +71,7 @@ jobs:
       - name: Package
         run: |
           set -Eeuo pipefail
-          asset="zejtron-bin-${TAG}-${{ matrix.arch }}"
+          asset="zejtron-${TAG}-${{ matrix.arch }}"
           staging="$(mktemp -d)"
           mkdir -p "${staging}/${asset}"
           cp "target/${{ matrix.target }}/release/zejtron" \
@@ -96,10 +96,10 @@ jobs:
         with:
           name: release-${{ matrix.arch }}
           path: |
-            zejtron-bin-${{ env.TAG }}-${{ matrix.arch }}.tar.gz
-            zejtron-bin-${{ env.TAG }}-${{ matrix.arch }}.tar.gz.sha512sum
-            zejtron-bin-${{ env.TAG }}-${{ matrix.arch }}.tar.gz.b2sum
-            zejtron-bin-${{ env.TAG }}-${{ matrix.arch }}.tar.gz.shake256
+            zejtron-${{ env.TAG }}-${{ matrix.arch }}.tar.gz
+            zejtron-${{ env.TAG }}-${{ matrix.arch }}.tar.gz.sha512sum
+            zejtron-${{ env.TAG }}-${{ matrix.arch }}.tar.gz.b2sum
+            zejtron-${{ env.TAG }}-${{ matrix.arch }}.tar.gz.shake256
           retention-days: 1
 
   release:

@@ -45,10 +45,10 @@ yay -S zejtron-bin
 
 ```sh
 TAG=v10.0.2
-curl -LO "https://github.com/oxyzenQ/zejtron/releases/download/${TAG}/zejtron-bin-${TAG}-linux-amd64-gnu.tar.gz"
-curl -LO "https://github.com/oxyzenQ/zejtron/releases/download/${TAG}/zejtron-bin-${TAG}-linux-amd64-gnu.tar.gz.sha512sum"
-sha512sum --check "zejtron-bin-${TAG}-linux-amd64-gnu.tar.gz.sha512sum"
-tar -xzf "zejtron-bin-${TAG}-linux-amd64-gnu.tar.gz"
+curl -LO "https://github.com/oxyzenQ/zejtron/releases/download/${TAG}/zejtron-${TAG}-linux-amd64-gnu.tar.gz"
+curl -LO "https://github.com/oxyzenQ/zejtron/releases/download/${TAG}/zejtron-${TAG}-linux-amd64-gnu.tar.gz.sha512sum"
+sha512sum --check "zejtron-${TAG}-linux-amd64-gnu.tar.gz.sha512sum"
+tar -xzf "zejtron-${TAG}-linux-amd64-gnu.tar.gz"
 install -Dm755 zejtron "$HOME/.local/bin/zejtron"
 ```
 

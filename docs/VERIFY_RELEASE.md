@@ -36,8 +36,8 @@ EXPECTED=$(awk '{print $1}' project-vX.Y.Z-linux-amd64-gnu.tar.gz.shake256)
 ```
 
 Replace `project-vX.Y.Z-linux-amd64-gnu` with the actual archive name
-(e.g. `zejtron-bin-v10.0.1-linux-amd64-gnu` or
-`zejtron-bin-v10.0.1-linux-amd64-musl`).
+(e.g. `zejtron-v10.0.1-linux-amd64-gnu` or
+`zejtron-v10.0.1-linux-amd64-musl`).
 
 ## Why three algorithms
 
