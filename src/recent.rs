@@ -4,6 +4,7 @@
 use std::cmp::Reverse;
 use std::fs;
 use std::io;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -13,6 +14,10 @@ const IGNORED_DIRECTORIES: &[&str] = &[".git", "target", "node_modules", ".cache
 pub struct RecentFile {
     pub path: PathBuf,
     pub modified: SystemTime,
+    pub changed: SystemTime,
+    pub size: u64,
+    pub uid: u32,
+    pub perms: u32,
 }
 
 pub fn run(
@@ -29,29 +34,36 @@ pub fn run(
     }
 
     let now = SystemTime::now();
-    let rows: Vec<(String, String)> = files
+    let rows: Vec<(String, String, String)> = files
         .iter()
         .map(|file| {
+            let owner = crate::process::lookup_username(file.uid);
             (
                 display_relative_path(path, &file.path),
                 rough_age(now, file.modified),
+                format!(
+                    "{} {} {:04o}",
+                    human_size(file.size),
+                    owner,
+                    file.perms & 0o7777
+                ),
             )
         })
         .collect();
     let width = rows
         .iter()
-        .map(|(path, _)| path.chars().count())
+        .map(|(path, _, _)| path.chars().count())
         .max()
         .unwrap_or(0);
 
     println!("modified files:");
-    for (index, (path, age)) in rows.iter().enumerate() {
+    for (index, (path, age, meta)) in rows.iter().enumerate() {
         let prefix = if index + 1 == rows.len() {
             "└──"
         } else {
             "├──"
         };
-        println!("{prefix} {path:<width$}  {age}");
+        println!("{prefix} {path:<width$}  {age}  {meta}");
     }
 
     Ok(())
@@ -115,9 +127,14 @@ fn scan_path(path: &Path, files: &mut Vec<RecentFile>, is_root: bool) -> io::Res
 
     if metadata.is_file() {
         if let Ok(modified) = metadata.modified() {
+            let changed = SystemTime::UNIX_EPOCH + Duration::from_secs(metadata.ctime() as u64);
             files.push(RecentFile {
                 path: path.to_path_buf(),
                 modified,
+                changed,
+                size: metadata.len(),
+                uid: metadata.uid(),
+                perms: metadata.permissions().mode(),
             });
         }
         return Ok(());
@@ -154,9 +171,14 @@ fn scan_path(path: &Path, files: &mut Vec<RecentFile>, is_root: bool) -> io::Res
             let Ok(modified) = metadata.modified() else {
                 continue;
             };
+            let changed = SystemTime::UNIX_EPOCH + Duration::from_secs(metadata.ctime() as u64);
             files.push(RecentFile {
                 path: entry_path,
                 modified,
+                changed,
+                size: metadata.len(),
+                uid: metadata.uid(),
+                perms: metadata.permissions().mode(),
             });
         }
     }
@@ -202,6 +224,18 @@ fn rough_age(now: SystemTime, modified: SystemTime) -> String {
     }
 }
 
+fn human_size(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{:.1}GB", bytes as f64 / 1024.0 / 1024.0 / 1024.0)
+    } else if bytes >= 1024 * 1024 {
+        format!("{:.1}MB", bytes as f64 / 1024.0 / 1024.0)
+    } else if bytes >= 1024 {
+        format!("{:.1}KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes}B")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,14 +263,26 @@ mod tests {
             RecentFile {
                 path: PathBuf::from("old"),
                 modified: now - Duration::from_secs(20),
+                changed: now - Duration::from_secs(20),
+                size: 100,
+                uid: 1000,
+                perms: 0o644,
             },
             RecentFile {
                 path: PathBuf::from("new"),
                 modified: now,
+                changed: now,
+                size: 100,
+                uid: 1000,
+                perms: 0o644,
             },
             RecentFile {
                 path: PathBuf::from("middle"),
                 modified: now - Duration::from_secs(10),
+                changed: now - Duration::from_secs(10),
+                size: 100,
+                uid: 1000,
+                perms: 0o644,
             },
         ];
 
@@ -253,6 +299,10 @@ mod tests {
         let files = vec![RecentFile {
             path: PathBuf::from("file"),
             modified: now,
+            changed: now,
+            size: 100,
+            uid: 1000,
+            perms: 0o644,
         }];
 
         assert!(select_recent_files(files, 0, None, now).is_empty());

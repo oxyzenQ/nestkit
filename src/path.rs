@@ -19,21 +19,33 @@ pub struct PathMatch {
     pub symlink_chain: Vec<PathBuf>,
 }
 
-pub fn run(command: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let matches = find_in_path(command, env::var_os("PATH").as_deref())?;
+pub fn run(command: &str, verbose: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let path_env = env::var_os("PATH");
+    let matches = find_in_path(command, path_env.as_deref())?;
 
     if matches.is_empty() {
         println!("command not found in PATH: {command}");
+        if verbose {
+            if let Some(ref pe) = path_env {
+                print_path_audit(pe);
+            }
+        }
         return Ok(());
     }
 
-    let report = format_path_report(command, &matches, pacman_available().as_deref());
+    let report = format_path_report(command, &matches, verbose);
     println!("{report}");
+
+    if verbose {
+        if let Some(ref pe) = path_env {
+            print_path_audit(pe);
+        }
+    }
 
     Ok(())
 }
 
-pub fn format_path_report(command: &str, matches: &[PathMatch], pacman: Option<&Path>) -> String {
+pub fn format_path_report(command: &str, matches: &[PathMatch], verbose: bool) -> String {
     let Some((active, duplicates)) = matches.split_first() else {
         return format!("command not found in PATH: {command}");
     };
@@ -42,10 +54,20 @@ pub fn format_path_report(command: &str, matches: &[PathMatch], pacman: Option<&
 
     lines.push(format!("├── active: {}", display_match_path(active)));
     lines.push(format!("├── executable: {}", yes_no(active.executable)));
+    let pkg = package_owner_multi(&active.path);
     lines.push(format!(
         "├── package: {}",
-        package_owner(&active.path, pacman).unwrap_or_else(|| "unknown".to_owned())
+        pkg.as_deref().unwrap_or("unknown")
     ));
+
+    if verbose {
+        if let Some(meta) = file_metadata(&active.path) {
+            lines.push(format!("├── size: {} bytes", meta.size));
+            lines.push(format!("├── owner: {}", meta.owner));
+            lines.push(format!("├── perms: {}", meta.perms));
+            lines.push(format!("├── mtime: {}", meta.mtime));
+        }
+    }
 
     if duplicates.is_empty() {
         lines.push("└── duplicates: none".to_owned());
@@ -72,7 +94,9 @@ pub fn format_path_report(command: &str, matches: &[PathMatch], pacman: Option<&
         ));
         lines.push(format!(
             "{detail_prefix}└── package: {}",
-            package_owner(&path_match.path, pacman).unwrap_or_else(|| "unknown".to_owned())
+            package_owner_multi(&path_match.path)
+                .as_deref()
+                .unwrap_or("unknown")
         ));
     }
 
@@ -163,29 +187,154 @@ fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
 }
 
-fn pacman_available() -> Option<PathBuf> {
-    let path_env = env::var_os("PATH")?;
-    find_in_path("pacman", Some(path_env.as_os_str()))
-        .ok()?
-        .into_iter()
-        .find(|path_match| path_match.executable)
-        .map(|path_match| path_match.path)
+/// Multi-backend package owner lookup. Tries each backend in order of
+/// availability: pacman (Arch), dpkg (Debian/Ubuntu), rpm (Fedora/RHEL),
+/// apk (Alpine). Returns the first match.
+fn package_owner_multi(path: &Path) -> Option<String> {
+    if let Some(pkg) = try_pacman(path) {
+        return Some(format!("{pkg} (pacman)"));
+    }
+    if let Some(pkg) = try_dpkg(path) {
+        return Some(format!("{pkg} (dpkg)"));
+    }
+    if let Some(pkg) = try_rpm(path) {
+        return Some(format!("{pkg} (rpm)"));
+    }
+    if let Some(pkg) = try_apk(path) {
+        return Some(format!("{pkg} (apk)"));
+    }
+    None
 }
 
-fn package_owner(path: &Path, pacman: Option<&Path>) -> Option<String> {
-    let pacman = pacman?;
-    let output = Command::new(pacman).args(["-Qo"]).arg(path).output().ok()?;
+fn try_pacman(path: &Path) -> Option<String> {
+    let output = Command::new("pacman")
+        .args(["-Qo", "--quiet"])
+        .arg(path)
+        .output()
+        .ok()?;
     if !output.status.success() {
         return None;
     }
-
-    let stdout = String::from_utf8(output.stdout).ok()?;
-    parse_pacman_owner(&stdout)
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout.trim().to_owned().into()
 }
 
-fn parse_pacman_owner(stdout: &str) -> Option<String> {
-    let (_, owner) = stdout.split_once(" is owned by ")?;
-    owner.split_whitespace().next().map(ToOwned::to_owned)
+fn try_dpkg(path: &Path) -> Option<String> {
+    let output = Command::new("dpkg")
+        .args(["-S", "--"])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // dpkg -S output: "package: /path/to/file" — take first colon-separated
+    stdout
+        .lines()
+        .next()?
+        .split(':')
+        .next()?
+        .trim()
+        .to_owned()
+        .into()
+}
+
+fn try_rpm(path: &Path) -> Option<String> {
+    let output = Command::new("rpm")
+        .args(["-qf", "--queryformat", "%{NAME}"])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let pkg = stdout.trim();
+    if pkg.is_empty() || pkg.contains("not installed") {
+        None
+    } else {
+        pkg.to_owned().into()
+    }
+}
+
+fn try_apk(path: &Path) -> Option<String> {
+    let output = Command::new("apk")
+        .args(["info", "--who-owns", "--quiet"])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout.trim().to_owned().into()
+}
+
+/// File metadata for --verbose output.
+struct FileMeta {
+    size: u64,
+    owner: String,
+    perms: String,
+    mtime: String,
+}
+
+fn file_metadata(path: &Path) -> Option<FileMeta> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = fs::metadata(path).ok()?;
+    let perms = format!("{:04o}", meta.permissions().mode() & 0o7777);
+    let uid = meta.uid();
+    let owner = crate::process::lookup_username(uid);
+    let mtime = format_system_time(meta.modified().ok()?);
+    Some(FileMeta {
+        size: meta.len(),
+        owner,
+        perms,
+        mtime,
+    })
+}
+
+fn format_system_time(time: std::time::SystemTime) -> String {
+    let datetime: chrono::DateTime<chrono::Local> = time.into();
+    datetime.format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+/// Audit each $PATH component for security-relevant issues:
+/// world-writable directories, missing directories, and directories not
+/// owned by root.
+fn print_path_audit(path_env: &OsStr) {
+    println!();
+    println!("PATH audit:");
+    for directory in env::split_paths(path_env) {
+        let dir_str = directory.display().to_string();
+        if dir_str.is_empty() {
+            continue;
+        }
+        match fs::metadata(&directory) {
+            Ok(meta) => {
+                use std::os::unix::fs::MetadataExt;
+                let mode = meta.permissions().mode();
+                let world_writable = mode & 0o002 != 0;
+                let uid = meta.uid();
+                let owner = crate::process::lookup_username(uid);
+                let mut warnings = Vec::new();
+                if world_writable {
+                    warnings.push("world-writable".to_owned());
+                }
+                if uid != 0 {
+                    warnings.push(format!("owned by {owner} (not root)"));
+                }
+                if warnings.is_empty() {
+                    println!("  ✓ {dir_str}");
+                } else {
+                    println!("  ⚠ {dir_str} — {}", warnings.join(", "));
+                }
+            }
+            Err(_) => {
+                println!("  ✗ {dir_str} — missing");
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -263,7 +412,7 @@ mod tests {
         }];
 
         assert_eq!(
-            format_path_report("tool", &matches, None),
+            format_path_report("tool", &matches, false),
             "tool\n├── active: /usr/bin/tool\n├── executable: yes\n├── package: unknown\n└── duplicates: none"
         );
     }
@@ -284,7 +433,7 @@ mod tests {
         ];
 
         assert_eq!(
-            format_path_report("tool", &matches, None),
+            format_path_report("tool", &matches, false),
             "tool\n├── active: /usr/bin/tool\n├── executable: yes\n├── package: unknown\n└── duplicates:\n    └── /home/rezky/.local/bin/tool\n       ├── executable: yes\n       └── package: unknown"
         );
     }
@@ -304,13 +453,5 @@ mod tests {
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].symlink_chain, vec![PathBuf::from("tool-real")]);
         assert!(matches[0].executable);
-    }
-
-    #[test]
-    fn parses_pacman_owner() {
-        assert_eq!(
-            parse_pacman_owner("/usr/bin/python is owned by python 3.13.3-1\n"),
-            Some("python".to_owned())
-        );
     }
 }

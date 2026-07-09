@@ -49,6 +49,16 @@ pub struct ShellReport {
     pub env_vars: Vec<(String, String)>,
     pub configs: Vec<ConfigEntry>,
     pub config_source: Option<ConfigSource>,
+    pub ancestor_chain: Vec<AncestorEntry>,
+}
+
+/// One entry in the ancestor process chain (from current process to PID 1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AncestorEntry {
+    pub pid: u32,
+    pub ppid: u32,
+    pub name: String,
+    pub cmdline: Option<String>,
 }
 
 pub fn run() -> Result<(), Box<dyn Error>> {
@@ -100,7 +110,23 @@ fn collect_report() -> ShellReport {
         env_vars,
         configs,
         config_source,
+        ancestor_chain: read_ancestor_chain(),
     }
+}
+
+/// Walk the full ancestor chain from the current process to PID 1.
+fn read_ancestor_chain() -> Vec<AncestorEntry> {
+    let own_pid = std::process::id();
+    let chain = crate::process::parent_chain(std::path::Path::new("/proc"), own_pid);
+    chain
+        .into_iter()
+        .map(|ctx| AncestorEntry {
+            pid: ctx.pid,
+            ppid: ctx.ppid,
+            name: ctx.name,
+            cmdline: ctx.cmdline,
+        })
+        .collect()
 }
 
 fn read_parent_process() -> Option<ParentProcess> {
@@ -263,8 +289,37 @@ pub fn render_report(report: &ShellReport) -> String {
     render_terminal_section(&mut lines, report);
     render_env_section(&mut lines, report);
     render_configs_section(&mut lines, report);
+    render_ancestor_chain_section(&mut lines, report);
 
     lines.join("\n")
+}
+
+fn render_ancestor_chain_section(lines: &mut Vec<String>, report: &ShellReport) {
+    if report.ancestor_chain.is_empty() {
+        return;
+    }
+    lines.push(String::new());
+    lines.push("└── ancestor-chain (to PID 1)".to_owned());
+    for (i, entry) in report.ancestor_chain.iter().enumerate() {
+        let is_last = i + 1 == report.ancestor_chain.len();
+        let branch = if is_last { "└──" } else { "├──" };
+        let mut line = format!("    {branch} {} pid={}", entry.name, entry.pid);
+        if entry.pid != 1 {
+            line.push_str(&format!(" (ppid={})", entry.ppid));
+        }
+        if let Some(ref cmd) = entry.cmdline {
+            if !cmd.is_empty() && cmd.as_str() != entry.name {
+                // Truncate long cmdlines for readability
+                let truncated = if cmd.len() > 80 {
+                    format!("{}...", &cmd[..77])
+                } else {
+                    cmd.clone()
+                };
+                line.push_str(&format!(" cmd={truncated}"));
+            }
+        }
+        lines.push(line);
+    }
 }
 
 fn render_invocation_section(lines: &mut Vec<String>, report: &ShellReport) {
@@ -484,6 +539,8 @@ mod tests {
                 },
             ],
             config_source: Some(ConfigSource::Parent("bash".to_owned())),
+
+            ancestor_chain: vec![],
         };
 
         let output = render_report(&report);
@@ -506,6 +563,7 @@ mod tests {
             env_vars: vec![("SHELL".to_owned(), "/bin/bash".to_owned())],
             configs: vec![],
             config_source: Some(ConfigSource::Login("bash".to_owned())),
+            ancestor_chain: vec![],
         };
 
         let output = render_report(&report);
@@ -526,6 +584,8 @@ mod tests {
             env_vars: vec![],
             configs: vec![],
             config_source: Some(ConfigSource::Parent("sh".to_owned())),
+
+            ancestor_chain: vec![],
         };
 
         let output = render_report(&report);
@@ -545,6 +605,8 @@ mod tests {
                 status: ConfigStatus::Missing,
             }],
             config_source: None,
+
+            ancestor_chain: vec![],
         };
 
         let output = render_report(&report);
@@ -658,6 +720,8 @@ mod tests {
                 status: ConfigStatus::Readable,
             }],
             config_source: Some(ConfigSource::Parent("bash".to_owned())),
+
+            ancestor_chain: vec![],
         };
 
         let output = render_report(&report);
@@ -697,6 +761,8 @@ mod tests {
                 },
             ],
             config_source: Some(ConfigSource::Parent("bash".to_owned())),
+
+            ancestor_chain: vec![],
         };
 
         let output = render_report(&report);
@@ -721,6 +787,7 @@ mod tests {
             ],
             configs: vec![],
             config_source: None,
+            ancestor_chain: vec![],
         };
 
         let output = render_report(&report);
@@ -743,6 +810,8 @@ mod tests {
                 status: ConfigStatus::Missing,
             }],
             config_source: None,
+
+            ancestor_chain: vec![],
         };
 
         let output = render_report(&report);
@@ -767,6 +836,7 @@ mod tests {
             env_vars: vec![],
             configs: vec![],
             config_source: None,
+            ancestor_chain: vec![],
         };
 
         let output = render_report(&report);
@@ -798,6 +868,8 @@ mod tests {
                 status: ConfigStatus::Readable,
             }],
             config_source: None,
+
+            ancestor_chain: vec![],
         };
 
         let output = render_report(&report);
@@ -820,6 +892,7 @@ mod tests {
             env_vars: vec![("SHELL".to_owned(), "/bin/bash".to_owned())],
             configs: vec![],
             config_source: None,
+            ancestor_chain: vec![],
         };
 
         let output = render_report(&report);
@@ -843,6 +916,8 @@ mod tests {
                 status: ConfigStatus::Readable,
             }],
             config_source: Some(ConfigSource::Parent("bash".to_owned())),
+
+            ancestor_chain: vec![],
         };
 
         let output = render_report(&report);
@@ -862,6 +937,8 @@ mod tests {
                 status: ConfigStatus::Readable,
             }],
             config_source: Some(ConfigSource::Login("zsh".to_owned())),
+
+            ancestor_chain: vec![],
         };
 
         let output = render_report(&report);
@@ -881,6 +958,8 @@ mod tests {
                 status: ConfigStatus::Missing,
             }],
             config_source: None,
+
+            ancestor_chain: vec![],
         };
 
         let output = render_report(&report);
@@ -908,6 +987,8 @@ mod tests {
                 status: ConfigStatus::Readable,
             }],
             config_source: Some(ConfigSource::Parent("bash".to_owned())),
+
+            ancestor_chain: vec![],
         };
 
         let output = render_report(&report);

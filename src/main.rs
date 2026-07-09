@@ -39,7 +39,7 @@ fn main() {
     }
 
     let result = match cli.command {
-        Some(cli::Commands::Path { command }) => path::run(&command),
+        Some(cli::Commands::Path { command, verbose }) => path::run(&command, verbose),
         Some(cli::Commands::Recent { path, limit, since }) => {
             recent::run(&path, limit, since.as_deref())
         }

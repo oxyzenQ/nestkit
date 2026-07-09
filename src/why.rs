@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use crate::holds::{self, Evidence, Holder, ScanStats};
-use crate::touch::{self, EvidenceSource, TouchInfo};
+#[cfg(test)]
+use crate::touch::EvidenceSource;
+use crate::touch::{self, TouchInfo};
 use std::error::Error;
 use std::fmt;
 use std::fs;
@@ -61,21 +63,57 @@ fn explain_port(port: u16) -> Result<String, WhyError> {
         return Ok(format!("No reason found for port {port}."));
     }
 
-    Ok(format_port_holder_reason(port, &holders, &stats))
+    // Cross-reference: for each holder, also read its systemd unit (via cgroup)
+    // and cmdline to synthesize a richer explanation.
+    let enriched: Vec<EnrichedHolder> = holders
+        .iter()
+        .map(|h| EnrichedHolder {
+            holder: h.clone(),
+            systemd_unit: crate::process::read_systemd_unit(Path::new("/proc"), h.pid),
+            cmdline: crate::process::read_cmdline(Path::new("/proc"), h.pid),
+        })
+        .collect();
+
+    Ok(format_port_synthesis(port, &enriched, &stats))
 }
 
 fn explain_path(path: &Path) -> Result<String, WhyError> {
     validate_path(path)?;
     let display = path.display().to_string();
+
+    // Always run BOTH holds and touch — the audit log might tell you who
+    // wrote a file 5 minutes ago even though no FD is currently open.
     let (holders, stats) =
         holds::scan_path_holders(path).map_err(|error| WhyError(error.to_string()))?;
+    let touch_info = touch::inspect_path(path).ok();
 
-    if !holders.is_empty() {
-        return Ok(format_path_holder_reason(&display, &holders, &stats));
+    if holders.is_empty() && touch_info.is_none() {
+        return Ok(format!("No reason found for '{display}'."));
     }
 
-    let info = touch::inspect_path(path).map_err(|error| WhyError(error.to_string()))?;
-    Ok(format_path_touch_reason(&info))
+    // Enrich holders with systemd unit + cmdline
+    let enriched: Vec<EnrichedHolder> = holders
+        .iter()
+        .map(|h| EnrichedHolder {
+            holder: h.clone(),
+            systemd_unit: crate::process::read_systemd_unit(Path::new("/proc"), h.pid),
+            cmdline: crate::process::read_cmdline(Path::new("/proc"), h.pid),
+        })
+        .collect();
+
+    Ok(format_path_synthesis(
+        &display,
+        &enriched,
+        touch_info.as_ref(),
+        &stats,
+    ))
+}
+
+/// A holder enriched with systemd unit and cmdline for cross-referencing.
+struct EnrichedHolder {
+    holder: Holder,
+    systemd_unit: Option<String>,
+    cmdline: Option<String>,
 }
 
 fn validate_path(path: &Path) -> Result<(), WhyError> {
@@ -88,6 +126,7 @@ fn validate_path(path: &Path) -> Result<(), WhyError> {
     })
 }
 
+#[cfg(test)]
 fn format_port_holder_reason(port: u16, holders: &[Holder], stats: &ScanStats) -> String {
     let mut lines = vec![
         format!(":{port}"),
@@ -116,6 +155,240 @@ fn format_no_visible_port_reason(port: u16) -> String {
     .join("\n")
 }
 
+/// Synthesized port explanation: cross-references holder PID + systemd unit
+/// (from cgroup) + cmdline to give a one-line "most likely explanation".
+fn format_port_synthesis(port: u16, enriched: &[EnrichedHolder], stats: &ScanStats) -> String {
+    let mut lines = vec![format!(":{port}")];
+
+    // Synthesis line — the "dragon hunts the meal" one-liner
+    let synthesis = synthesize_port_explanation(enriched);
+    lines.push(format!("├── reason: {synthesis}"));
+
+    // Per-holder detail with systemd unit + cmdline
+    for e in enriched {
+        let mut holder_line = format!(
+            "├── holder: {} pid={} user={}",
+            e.holder.name, e.holder.pid, e.holder.user
+        );
+        if let Some(ref unit) = e.systemd_unit {
+            holder_line.push_str(&format!(" unit={unit}"));
+        }
+        lines.push(holder_line);
+        if let Some(ref cmd) = e.cmdline {
+            if !cmd.is_empty() && cmd.as_str() != e.holder.name {
+                lines.push(format!("│   ├── cmd: {cmd}"));
+            }
+        }
+        if let Some(ref cwd) = e.holder.cwd {
+            lines.push(format!("│   └── cwd {}", cwd.display()));
+        }
+    }
+
+    lines.push("└── evidence: socket inode matched from /proc/<pid>/fd".to_owned());
+    lines.push(String::new());
+    lines.push(format!(
+        "{} {}",
+        enriched.len(),
+        plural(enriched.len(), "reason", "reasons")
+    ));
+    append_incomplete_note(&mut lines, stats);
+    lines.join("\n")
+}
+
+fn synthesize_port_explanation(enriched: &[EnrichedHolder]) -> String {
+    if enriched.is_empty() {
+        return "no visible holder found".to_owned();
+    }
+    if enriched.len() == 1 {
+        let e = &enriched[0];
+        let mut parts = vec![format!("{} (pid={})", e.holder.name, e.holder.pid)];
+        if let Some(ref unit) = e.systemd_unit {
+            parts.push(format!("owned by {unit}"));
+        }
+        parts.push("owns this socket".to_owned());
+        return parts.join(" ");
+    }
+    // Multiple holders — summarize
+    let names: Vec<&str> = enriched.iter().map(|e| e.holder.name.as_str()).collect();
+    let unique: Vec<&str> = {
+        let mut seen = std::collections::HashSet::new();
+        names.iter().copied().filter(|n| seen.insert(*n)).collect()
+    };
+    if unique.len() == 1 {
+        format!(
+            "{} processes named '{}' share this socket",
+            enriched.len(),
+            unique[0]
+        )
+    } else {
+        format!(
+            "{} processes ({}) share this socket",
+            enriched.len(),
+            unique.join(", ")
+        )
+    }
+}
+
+/// Synthesized path explanation: cross-references holds + touch metadata +
+/// audit/journal evidence + systemd unit of holders.
+fn format_path_synthesis(
+    path: &str,
+    enriched: &[EnrichedHolder],
+    touch_info: Option<&TouchInfo>,
+    stats: &ScanStats,
+) -> String {
+    let mut lines = vec![path.to_owned()];
+
+    // Synthesis line
+    let synthesis = synthesize_path_explanation(enriched, touch_info);
+    lines.push(format!("├── reason: {synthesis}"));
+
+    // Holders section (if any)
+    if !enriched.is_empty() {
+        lines.push(format!("├── holders ({}):", enriched.len()));
+        for e in enriched {
+            let mut holder_line = format!(
+                "│   ├── {} pid={} user={}",
+                e.holder.name, e.holder.pid, e.holder.user
+            );
+            if let Some(ref unit) = e.systemd_unit {
+                holder_line.push_str(&format!(" unit={unit}"));
+            }
+            lines.push(holder_line);
+            // Evidence
+            for ev in &e.holder.evidence {
+                lines.push(format!("│   │   ├── {}", ev.label()));
+            }
+        }
+    }
+
+    // Touch/metadata section (if available)
+    if let Some(info) = touch_info {
+        lines.push("├── metadata:".to_owned());
+        if let Some(ref meta) = info.meta {
+            lines.push(format!("│   ├── type: {}", meta.file_type));
+            lines.push(format!("│   ├── size: {} bytes", meta.size));
+            lines.push(format!("│   ├── perms: {}", meta.perms_octal));
+            lines.push(format!(
+                "│   ├── modified: {}",
+                touch::format_system_time(meta.modified)
+            ));
+            lines.push(format!(
+                "│   └── changed:  {}",
+                touch::format_system_time(meta.changed)
+            ));
+        } else {
+            lines.push(format!(
+                "│   └── modified: {}",
+                touch::format_system_time(info.modified)
+            ));
+        }
+        if info.source != touch::EvidenceSource::Metadata {
+            lines.push(format!(
+                "├── actor: {} ({})",
+                info.actor,
+                info.source.label()
+            ));
+            if let Some(proc) = &info.process {
+                lines.push(format!("│   └── process: {}", proc.label()));
+            }
+        }
+    }
+
+    lines.push(format!(
+        "└── evidence: {}",
+        if enriched.is_empty() {
+            "filesystem metadata"
+        } else {
+            summarize_path_evidence(
+                &enriched
+                    .iter()
+                    .map(|e| e.holder.clone())
+                    .collect::<Vec<_>>(),
+            )
+        }
+    ));
+    lines.push(String::new());
+    let reason_count = enriched.len() + if touch_info.is_some() { 1 } else { 0 };
+    lines.push(format!(
+        "{} {}",
+        reason_count,
+        plural(reason_count, "reason", "reasons")
+    ));
+    append_incomplete_note(&mut lines, stats);
+    lines.join("\n")
+}
+
+fn synthesize_path_explanation(
+    enriched: &[EnrichedHolder],
+    touch_info: Option<&TouchInfo>,
+) -> String {
+    match (enriched.is_empty(), touch_info) {
+        (false, Some(info)) => {
+            // Both holders and touch — combine
+            let holder_names: Vec<&str> = enriched.iter().map(|e| e.holder.name.as_str()).collect();
+            let unique: Vec<&str> = {
+                let mut seen = std::collections::HashSet::new();
+                holder_names
+                    .iter()
+                    .copied()
+                    .filter(|n| seen.insert(*n))
+                    .collect()
+            };
+            let actor = if info.actor != "unknown" {
+                format!("last modified by {}", info.actor)
+            } else {
+                "modification time on record".to_owned()
+            };
+            if unique.len() == 1 {
+                format!(
+                    "currently held by {} (pid={}), {}",
+                    enriched[0].holder.name, enriched[0].holder.pid, actor
+                )
+            } else {
+                format!(
+                    "{} processes ({}) hold this path, {}",
+                    enriched.len(),
+                    unique.join(", "),
+                    actor
+                )
+            }
+        }
+        (false, None) => {
+            let holder_names: Vec<&str> = enriched.iter().map(|e| e.holder.name.as_str()).collect();
+            let unique: Vec<&str> = {
+                let mut seen = std::collections::HashSet::new();
+                holder_names
+                    .iter()
+                    .copied()
+                    .filter(|n| seen.insert(*n))
+                    .collect()
+            };
+            if unique.len() == 1 {
+                format!(
+                    "currently held by {} (pid={})",
+                    enriched[0].holder.name, enriched[0].holder.pid
+                )
+            } else {
+                format!(
+                    "{} processes ({}) hold this path",
+                    enriched.len(),
+                    unique.join(", ")
+                )
+            }
+        }
+        (true, Some(info)) => {
+            if info.actor != "unknown" {
+                format!("last modified by {} ({})", info.actor, info.source.label())
+            } else {
+                "path exists with filesystem metadata only".to_owned()
+            }
+        }
+        (true, None) => "no evidence found".to_owned(),
+    }
+}
+
+#[cfg(test)]
 fn format_path_holder_reason(path: &str, holders: &[Holder], stats: &ScanStats) -> String {
     let mut lines = vec![
         path.to_owned(),
@@ -136,6 +409,7 @@ fn format_path_holder_reason(path: &str, holders: &[Holder], stats: &ScanStats) 
     lines.join("\n")
 }
 
+#[cfg(test)]
 fn format_path_touch_reason(info: &TouchInfo) -> String {
     let mut lines = vec![info.path.display().to_string()];
     let reason = match info.source {
@@ -169,6 +443,7 @@ fn format_path_touch_reason(info: &TouchInfo) -> String {
     lines.join("\n")
 }
 
+#[cfg(test)]
 fn append_holder_summaries(lines: &mut Vec<String>, holders: &[Holder], show_cwd: bool) {
     for holder in holders {
         lines.push(format!(
@@ -231,7 +506,7 @@ fn plural<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::touch::ProcessEvidence;
+    use crate::touch::{EvidenceSource, ProcessEvidence};
     use std::os::unix::fs::symlink;
     use std::time::{Duration, UNIX_EPOCH};
     use tempfile::TempDir;

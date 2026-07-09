@@ -37,6 +37,11 @@ pub enum Commands {
     Path {
         #[arg(value_name = "COMMAND", help = "Command name to find in PATH")]
         command: String,
+        #[arg(
+            long,
+            help = "Show file metadata (size, owner, perms, mtime) and PATH audit"
+        )]
+        verbose: bool,
     },
     #[command(about = "Show recently modified files")]
     Recent {

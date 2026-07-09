@@ -149,6 +149,42 @@ pub fn read_cmdline(proc_root: &Path, pid: u32) -> Option<String> {
     }
 }
 
+/// Extract the systemd unit name from a cgroup string.
+///
+/// cgroup v2 paths look like:
+///   `0::/system.slice/nginx.service`
+///   `0::/user.slice/user-1000.slice/user@1000.service/app.slice/dbus.service`
+///   `0::/system.slice/systemd-resolved.service`
+///
+/// Returns the last component ending in `.service`, `.socket`, `.scope`,
+/// `.mount`, `.swap`, `.timer`, or `.target`. Returns `None` when no
+/// recognizable unit suffix is found (e.g., kernel threads, cgroup v1
+/// legacy paths without unit names).
+pub fn extract_systemd_unit(cgroup: &str) -> Option<String> {
+    let suffixes = [
+        ".service", ".socket", ".scope", ".mount", ".swap", ".timer", ".target",
+    ];
+    // Walk path components in reverse, return first match
+    for component in cgroup.split('/').rev() {
+        for suffix in &suffixes {
+            if component.ends_with(suffix) && component.len() > suffix.len() {
+                return Some(component.to_owned());
+            }
+        }
+    }
+    None
+}
+
+/// Read /proc/<pid>/cgroup and extract the systemd unit name.
+pub fn read_systemd_unit(proc_root: &Path, pid: u32) -> Option<String> {
+    let cgroup = fs::read_to_string(proc_root.join(pid.to_string()).join("cgroup")).ok()?;
+    // Take the last non-empty line (usually the unified v2 line)
+    let last = cgroup.lines().rev().find(|l| !l.trim().is_empty())?;
+    // Format: `0::/system.slice/nginx.service` — take everything after the last `:`
+    let path = last.rsplit_once(':').map(|(_, p)| p).unwrap_or(last);
+    extract_systemd_unit(path)
+}
+
 /// A condensed process context. Built once per target PID and consumed by
 /// every subcommand that needs to display "this is who did it" information.
 #[derive(Debug, Clone)]
@@ -516,5 +552,42 @@ mod tests {
         assert_eq!(quote_if_needed("simple"), "simple");
         assert_eq!(quote_if_needed("has space"), "'has space'");
         assert_eq!(quote_if_needed("has'quote"), "\"has'quote\"");
+    }
+
+    #[test]
+    fn extract_systemd_unit_from_v2_path() {
+        assert_eq!(
+            extract_systemd_unit("0::/system.slice/nginx.service"),
+            Some("nginx.service".to_owned())
+        );
+        assert_eq!(
+            extract_systemd_unit(
+                "0::/user.slice/user-1000.slice/user@1000.service/app.slice/dbus.service"
+            ),
+            Some("dbus.service".to_owned())
+        );
+        assert_eq!(
+            extract_systemd_unit("0::/system.slice/systemd-resolved.service"),
+            Some("systemd-resolved.service".to_owned())
+        );
+    }
+
+    #[test]
+    fn extract_systemd_unit_handles_other_suffixes() {
+        assert_eq!(
+            extract_systemd_unit("0::/system.slice/foo.socket"),
+            Some("foo.socket".to_owned())
+        );
+        assert_eq!(
+            extract_systemd_unit("0::/system.slice/session-1.scope"),
+            Some("session-1.scope".to_owned())
+        );
+    }
+
+    #[test]
+    fn extract_systemd_unit_returns_none_for_kernel_threads() {
+        assert_eq!(extract_systemd_unit("0::/"), None);
+        assert_eq!(extract_systemd_unit("0::/user.slice"), None);
+        assert_eq!(extract_systemd_unit(""), None);
     }
 }
