@@ -44,7 +44,7 @@ yay -S zejtron-bin
 ### GitHub Release
 
 ```sh
-TAG=v10.0.2
+TAG=v11.0.0
 curl -LO "https://github.com/oxyzenQ/zejtron/releases/download/${TAG}/zejtron-${TAG}-linux-amd64-gnu.tar.gz"
 curl -LO "https://github.com/oxyzenQ/zejtron/releases/download/${TAG}/zejtron-${TAG}-linux-amd64-gnu.tar.gz.sha512sum"
 sha512sum --check "zejtron-${TAG}-linux-amd64-gnu.tar.gz.sha512sum"
