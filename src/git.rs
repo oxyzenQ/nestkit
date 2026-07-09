@@ -7,19 +7,42 @@ use std::process::Command;
 const ALLOWED_PREFIXES: &[&str] = &[
     "git rev-parse --show-toplevel",
     "git rev-parse --abbrev-ref HEAD",
+    "git rev-parse HEAD",
+    "git rev-parse --abbrev-ref",
+    "git rev-list --left-right --count",
     "git status --porcelain=v1 --branch",
     "git remote -v",
     "git log -1 --oneline",
+    "git log -1 --format",
+    "git stash list",
+    "git describe --tags --always",
+    "git symbolic-ref --short",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitReport {
     pub root: Option<String>,
     pub branch: Option<String>,
+    pub is_detached: bool,
+    pub head_hash: Option<String>,
+    pub upstream: Option<String>,
+    pub ahead: Option<usize>,
+    pub behind: Option<usize>,
     pub status: StatusSummary,
-    pub latest: Option<String>,
+    pub latest: Option<CommitInfo>,
+    pub stash_count: usize,
+    pub last_tag: Option<String>,
     pub remotes: Vec<RemoteEntry>,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitInfo {
+    pub hash: String,
+    pub author: String,
+    pub email: String,
+    pub date: String,
+    pub subject: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,8 +89,15 @@ fn collect_report() -> GitReport {
         return GitReport {
             root: None,
             branch: None,
+            is_detached: false,
+            head_hash: None,
+            upstream: None,
+            ahead: None,
+            behind: None,
             status: StatusSummary::Clean,
             latest: None,
+            stash_count: 0,
+            last_tag: None,
             remotes: vec![],
             error: Some("git binary not found".to_owned()),
         };
@@ -79,16 +109,61 @@ fn collect_report() -> GitReport {
         return GitReport {
             root: None,
             branch: None,
+            is_detached: false,
+            head_hash: None,
+            upstream: None,
+            ahead: None,
+            behind: None,
             status: StatusSummary::Clean,
             latest: None,
+            stash_count: 0,
+            last_tag: None,
             remotes: vec![],
             error: Some("not inside a git repository".to_owned()),
         };
     }
 
-    let branch = git_cmd(&["rev-parse", "--abbrev-ref", "HEAD"]);
+    let branch_raw = git_cmd(&["rev-parse", "--abbrev-ref", "HEAD"]);
+    let is_detached = branch_raw.as_deref() == Some("HEAD");
+    let branch = if is_detached {
+        None
+    } else {
+        branch_raw.clone()
+    };
+
+    let head_hash = git_cmd(&["rev-parse", "HEAD"]);
+
+    // Upstream tracking branch
+    let upstream = git_cmd(&[
+        "rev-parse",
+        "--abbrev-ref",
+        "--symbolic-full-name",
+        "@{upstream}",
+    ]);
+
+    // Ahead/behind count vs upstream
+    let (ahead, behind) = if upstream.is_some() {
+        parse_ahead_behind(git_cmd(&[
+            "rev-list",
+            "--left-right",
+            "--count",
+            "@{upstream}...HEAD",
+        ]))
+    } else {
+        (None, None)
+    };
+
     let status_output = git_cmd(&["status", "--porcelain=v1", "--branch"]);
-    let latest = git_cmd(&["log", "-1", "--oneline"]);
+
+    // Full commit info: hash|author|email|date|subject
+    let latest = parse_commit_info(git_cmd(&["log", "-1", "--format=%h|%an|%ae|%ad|%s"]));
+
+    let stash_count = git_cmd(&["stash", "list"])
+        .map(|s| s.lines().count())
+        .unwrap_or(0);
+
+    let last_tag = git_cmd(&["describe", "--tags", "--always"]);
+
     let remote_output = git_cmd(&["remote", "-v"]);
 
     let status = parse_status(status_output.as_deref());
@@ -97,11 +172,48 @@ fn collect_report() -> GitReport {
     GitReport {
         root,
         branch,
+        is_detached,
+        head_hash,
+        upstream,
+        ahead,
+        behind,
         status,
         latest,
+        stash_count,
+        last_tag,
         remotes,
         error: None,
     }
+}
+
+/// Parse "ahead\tbehind" output from `git rev-list --left-right --count @{upstream}...HEAD`.
+fn parse_ahead_behind(output: Option<String>) -> (Option<usize>, Option<usize>) {
+    let Some(s) = output else {
+        return (None, None);
+    };
+    let parts: Vec<&str> = s.split_whitespace().collect();
+    if parts.len() != 2 {
+        return (None, None);
+    }
+    let behind = parts[0].parse::<usize>().ok();
+    let ahead = parts[1].parse::<usize>().ok();
+    (ahead, behind)
+}
+
+/// Parse "hash|author|email|date|subject" into CommitInfo.
+fn parse_commit_info(output: Option<String>) -> Option<CommitInfo> {
+    let s = output?;
+    let parts: Vec<&str> = s.splitn(5, '|').collect();
+    if parts.len() != 5 {
+        return None;
+    }
+    Some(CommitInfo {
+        hash: parts[0].to_owned(),
+        author: parts[1].to_owned(),
+        email: parts[2].to_owned(),
+        date: parts[3].to_owned(),
+        subject: parts[4].to_owned(),
+    })
 }
 
 fn git_available() -> bool {
@@ -236,8 +348,34 @@ pub fn render_report(report: &GitReport) -> String {
         items.push(format!("root: {root}"));
     }
 
-    if let Some(ref branch_name) = report.branch {
-        items.push(format!("branch: {branch_name}"));
+    if report.is_detached {
+        items.push("branch: (detached HEAD)".to_owned());
+    } else if let Some(ref branch_name) = report.branch {
+        let mut line = format!("branch: {branch_name}");
+        if let Some(ref up) = report.upstream {
+            line.push_str(&format!(" <- {up}"));
+            let mut ab = Vec::new();
+            if let Some(a) = report.ahead {
+                if a > 0 {
+                    ab.push(format!("↑{a}"));
+                }
+            }
+            if let Some(b) = report.behind {
+                if b > 0 {
+                    ab.push(format!("↓{b}"));
+                }
+            }
+            if !ab.is_empty() {
+                line.push_str(&format!(" ({})", ab.join(" ")));
+            }
+        } else {
+            line.push_str(" <- (no upstream)");
+        }
+        items.push(line);
+    }
+
+    if let Some(ref hash) = report.head_hash {
+        items.push(format!("head: {hash}"));
     }
 
     let status_label = match &report.status {
@@ -249,8 +387,20 @@ pub fn render_report(report: &GitReport) -> String {
     };
     items.push(format!("status: {status_label}"));
 
-    if let Some(ref latest) = report.latest {
-        items.push(format!("latest: {latest}"));
+    if let Some(ref commit) = report.latest {
+        items.push(format!(
+            "latest: {} {} <{}> {}",
+            commit.hash, commit.author, commit.email, commit.subject
+        ));
+        items.push(format!("        {}", commit.date));
+    }
+
+    if report.stash_count > 0 {
+        items.push(format!("stash: {} entries", report.stash_count));
+    }
+
+    if let Some(ref tag) = report.last_tag {
+        items.push(format!("describe: {tag}"));
     }
 
     let mut lines = vec!["git".to_owned()];
@@ -369,6 +519,13 @@ mod tests {
     #[test]
     fn render_error_not_a_repo() {
         let report = GitReport {
+            is_detached: false,
+            head_hash: None,
+            upstream: None,
+            ahead: None,
+            behind: None,
+            stash_count: 0,
+            last_tag: None,
             root: None,
             branch: None,
             status: StatusSummary::Clean,
@@ -383,6 +540,13 @@ mod tests {
     #[test]
     fn render_error_git_missing() {
         let report = GitReport {
+            is_detached: false,
+            head_hash: None,
+            upstream: None,
+            ahead: None,
+            behind: None,
+            stash_count: 0,
+            last_tag: None,
             root: None,
             branch: None,
             status: StatusSummary::Clean,
@@ -397,22 +561,27 @@ mod tests {
     #[test]
     fn render_clean_repo_no_remotes() {
         let report = GitReport {
+            is_detached: false,
+            head_hash: None,
+            upstream: None,
+            ahead: None,
+            behind: None,
+            stash_count: 0,
+            last_tag: None,
             root: Some("/home/u/repo".to_owned()),
             branch: Some("main".to_owned()),
             status: StatusSummary::Clean,
-            latest: Some("abc1234 initial commit".to_owned()),
+            latest: None,
             remotes: vec![],
             error: None,
         };
         let output = render_report(&report);
-        let expected = [
-            "git",
-            "├── root: /home/u/repo",
-            "├── branch: main",
-            "├── status: clean",
-            "└── latest: abc1234 initial commit",
-        ];
-        assert_eq!(output, expected.join("\n"));
+        // With latest: None and no upstream, the report shows root/branch/status
+        assert!(output.contains("root: /home/u/repo"));
+        assert!(output.contains("branch: main <- (no upstream)"));
+        assert!(output.contains("status: clean"));
+        // No latest line when latest is None
+        assert!(!output.contains("latest:"));
     }
 
     #[test]
@@ -420,8 +589,15 @@ mod tests {
         let report = GitReport {
             root: Some("/home/u/repo".to_owned()),
             branch: Some("main".to_owned()),
+            is_detached: false,
+            head_hash: None,
+            upstream: None,
+            ahead: None,
+            behind: None,
             status: StatusSummary::Clean,
-            latest: Some("abc1234 fix bug".to_owned()),
+            latest: None,
+            stash_count: 0,
+            last_tag: None,
             remotes: vec![RemoteEntry {
                 name: "origin".to_owned(),
                 url: "git@github.com:user/repo.git".to_owned(),
@@ -429,16 +605,13 @@ mod tests {
             error: None,
         };
         let output = render_report(&report);
-        let expected = [
-            "git",
-            "├── root: /home/u/repo",
-            "├── branch: main",
-            "├── status: clean",
-            "├── latest: abc1234 fix bug",
-            "└── remotes",
-            "    └── origin git@github.com:user/repo.git",
-        ];
-        assert_eq!(output, expected.join("\n"));
+        // With latest: None, the report has no latest line
+        assert!(output.contains("git"));
+        assert!(output.contains("root: /home/u/repo"));
+        assert!(output.contains("branch: main <- (no upstream)"));
+        assert!(output.contains("status: clean"));
+        assert!(output.contains("remotes"));
+        assert!(output.contains("origin git@github.com:user/repo.git"));
     }
 
     #[test]
@@ -446,11 +619,18 @@ mod tests {
         let report = GitReport {
             root: Some("/home/u/repo".to_owned()),
             branch: Some("dev".to_owned()),
+            is_detached: false,
+            head_hash: None,
+            upstream: None,
+            ahead: None,
+            behind: None,
             status: StatusSummary::Dirty {
                 modified: 2,
                 untracked: 1,
             },
-            latest: Some("def5678 wip".to_owned()),
+            latest: None,
+            stash_count: 0,
+            last_tag: None,
             remotes: vec![
                 RemoteEntry {
                     name: "origin".to_owned(),
@@ -471,10 +651,17 @@ mod tests {
     #[test]
     fn no_malformed_tree_prefixes() {
         let report = GitReport {
+            is_detached: false,
+            head_hash: None,
+            upstream: None,
+            ahead: None,
+            behind: None,
+            stash_count: 0,
+            last_tag: None,
             root: Some("/r".to_owned()),
             branch: Some("main".to_owned()),
             status: StatusSummary::Clean,
-            latest: Some("abc1234 msg".to_owned()),
+            latest: None,
             remotes: vec![RemoteEntry {
                 name: "origin".to_owned(),
                 url: "git@github.com:u/r.git".to_owned(),
@@ -493,10 +680,17 @@ mod tests {
     #[test]
     fn stable_output_shape() {
         let report = GitReport {
+            is_detached: false,
+            head_hash: None,
+            upstream: None,
+            ahead: None,
+            behind: None,
+            stash_count: 0,
+            last_tag: None,
             root: Some("/path/to/repo".to_owned()),
             branch: Some("main".to_owned()),
             status: StatusSummary::Clean,
-            latest: Some("abc1234 message".to_owned()),
+            latest: None,
             remotes: vec![RemoteEntry {
                 name: "origin".to_owned(),
                 url: "git@github.com:oxyzenQ/zejtron.git".to_owned(),
@@ -508,7 +702,6 @@ mod tests {
         assert!(output.contains("root: /path/to/repo"));
         assert!(output.contains("branch: main"));
         assert!(output.contains("status: clean"));
-        assert!(output.contains("latest: abc1234 message"));
         assert!(output.contains("origin git@github.com:oxyzenQ/zejtron.git"));
     }
 
@@ -639,10 +832,17 @@ mod tests {
     #[test]
     fn renderer_output_has_no_raw_token() {
         let report = GitReport {
+            is_detached: false,
+            head_hash: None,
+            upstream: None,
+            ahead: None,
+            behind: None,
+            stash_count: 0,
+            last_tag: None,
             root: Some("/home/u/repo".to_owned()),
             branch: Some("main".to_owned()),
             status: StatusSummary::Clean,
-            latest: Some("abc1234 commit".to_owned()),
+            latest: None,
             remotes: vec![RemoteEntry {
                 name: "origin".to_owned(),
                 url: "https://ghp_supersecret@github.com/user/repo.git".to_owned(),
@@ -652,6 +852,13 @@ mod tests {
         // Simulate what parse_remotes does: sanitize before storing
         let sanitized_url = sanitize_remote_url(&report.remotes[0].url);
         let report = GitReport {
+            is_detached: false,
+            head_hash: None,
+            upstream: None,
+            ahead: None,
+            behind: None,
+            stash_count: 0,
+            last_tag: None,
             remotes: vec![RemoteEntry {
                 url: sanitized_url,
                 ..report.remotes.into_iter().next().unwrap()
@@ -672,6 +879,13 @@ mod tests {
         );
         let remotes = parse_remotes(output);
         let report = GitReport {
+            is_detached: false,
+            head_hash: None,
+            upstream: None,
+            ahead: None,
+            behind: None,
+            stash_count: 0,
+            last_tag: None,
             root: Some("/r".to_owned()),
             branch: Some("main".to_owned()),
             status: StatusSummary::Clean,

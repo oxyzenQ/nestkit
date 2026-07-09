@@ -12,6 +12,7 @@ description = "Unified Linux introspection toolkit for paths, ports, processes, 
 chrono = { version = "0.4.42", default-features = false, features = ["clock"] }
 clap = { version = "4.5.40", features = ["derive"] }
 ctrlc = "3.4.7"
+regex-lite = "0.1"
 
 [dev-dependencies]
 tempfile = "3.20.0"

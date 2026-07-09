@@ -27,9 +27,13 @@ pub fn run(
     command: Option<EnvCommands>,
     keys_only: bool,
     filter: Option<&str>,
+    pid: Option<u32>,
+    mask_secrets: bool,
 ) -> Result<(), Box<dyn Error>> {
     match command {
         Some(EnvCommands::Save { name }) => {
+            // Snapshot of this process's own env only — saving another
+            // process's env to disk would be a credentials leak.
             save_snapshot(&name, &current_environment(), &data_dir()?)?;
             println!("Saved environment snapshot: {name}");
         }
@@ -52,8 +56,25 @@ pub fn run(
             println!("{}", format_diff(&name, &diff, show_same));
         }
         None => {
-            let variables = filter_environment(&current_environment(), filter);
-            println!("{}", format_environment(&variables, keys_only));
+            let mut env = if let Some(target_pid) = pid {
+                read_proc_environ(target_pid)?
+            } else {
+                current_environment()
+            };
+            if mask_secrets {
+                env = mask_secret_values(env);
+            }
+            let variables = filter_environment(&env, filter);
+            let report = format_environment(&variables, keys_only);
+            // If a target pid was given, splice "(pid=N)" into the first line
+            // so the header reflects the source.
+            if let Some(target_pid) = pid {
+                let report =
+                    report.replacen("environment", &format!("environment (pid={target_pid})"), 1);
+                println!("{report}");
+            } else {
+                println!("{report}");
+            }
         }
     }
     Ok(())
@@ -344,6 +365,82 @@ fn plural<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
     if count == 1 { singular } else { plural }
 }
 
+/// Read `/proc/<pid>/environ` (NUL-separated KEY=VALUE entries) and return
+/// a sorted snapshot. Returns an error if the file is missing or unreadable
+/// (typical for processes owned by another user without sudo).
+fn read_proc_environ(pid: u32) -> Result<Snapshot, Box<dyn Error>> {
+    let path = format!("/proc/{pid}/environ");
+    let bytes = std::fs::read(&path).map_err(|e| {
+        EnvError(format!(
+            "cannot read /proc/{pid}/environ: {e} (try sudo, or the process may not exist)"
+        ))
+    })?;
+    if bytes.is_empty() {
+        return Ok(Snapshot::new());
+    }
+    let mut snap = Snapshot::new();
+    for chunk in bytes.split(|&b| b == 0) {
+        if chunk.is_empty() {
+            continue;
+        }
+        if let Ok(s) = std::str::from_utf8(chunk) {
+            if let Some((k, v)) = s.split_once('=') {
+                snap.insert(k.to_owned(), v.to_owned());
+            }
+        }
+    }
+    Ok(snap)
+}
+
+/// Mask values whose key looks like a credential, and redact common secret
+/// patterns (AWS keys, GitHub PATs, JWTs, PEM private keys) inside any value.
+fn mask_secret_values(mut snap: Snapshot) -> Snapshot {
+    let secret_key_patterns: &[&str] = &[
+        "TOKEN",
+        "SECRET",
+        "PASSWORD",
+        "PASSWD",
+        "PASS",
+        "PWD",
+        "CREDENTIAL",
+        "API_KEY",
+        "APIKEY",
+        "PRIVATE_KEY",
+        "ACCESS_KEY",
+        "AUTH",
+        "BEARER",
+    ];
+    for (key, value) in snap.iter_mut() {
+        let upper = key.to_uppercase();
+        let key_is_secret = secret_key_patterns.iter().any(|p| upper.contains(p));
+        if key_is_secret {
+            *value = "***REDACTED***".to_owned();
+            continue;
+        }
+        *value = redact_secret_patterns(value);
+    }
+    snap
+}
+
+fn redact_secret_patterns(value: &str) -> String {
+    let mut out = value.to_owned();
+    // AWS access key id: AKIA + 16 uppercase alphanumerics
+    let aws_re = regex_lite::Regex::new(r"AKIA[0-9A-Z]{16}").unwrap();
+    out = aws_re.replace_all(&out, "AKIA***REDACTED***").to_string();
+    // GitHub PATs (classic and fine-grained)
+    let gh_re = regex_lite::Regex::new(r"gh[pousr]_[A-Za-z0-9]{36,}").unwrap();
+    out = gh_re.replace_all(&out, "ghp_***REDACTED***").to_string();
+    // JWT (eyJ... three base64 segments)
+    let jwt_re =
+        regex_lite::Regex::new(r"eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+").unwrap();
+    out = jwt_re.replace_all(&out, "eyJ***REDACTED***").to_string();
+    // PEM private key block
+    if out.contains("-----BEGIN") && out.contains("PRIVATE KEY-----") {
+        out = "***PEM-KEY-REDACTED***".to_owned();
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,5 +564,69 @@ mod tests {
         assert_eq!(load_snapshot("base", dir.path()).unwrap()["PATH"], "/bin");
         assert!(delete_snapshot("base", dir.path()).unwrap());
         assert!(list_snapshots(dir.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn mask_secret_values_redacts_token_keys() {
+        let snap = snapshot(&[
+            ("PATH", "/usr/bin"),
+            ("GITHUB_TOKEN", "ghp_abcdefghijklmnopqrstuvwxyz0123456789AB"),
+            ("DATABASE_URL", "postgres://user:s3cret@host/db"),
+            ("MY_PASSWORD", "hunter2"),
+        ]);
+        let masked = mask_secret_values(snap);
+        assert_eq!(masked["PATH"], "/usr/bin");
+        assert_eq!(masked["GITHUB_TOKEN"], "***REDACTED***");
+        assert_eq!(masked["MY_PASSWORD"], "***REDACTED***");
+        // DATABASE_URL key is not secret, value should pass through
+        assert!(masked["DATABASE_URL"].contains("s3cret"));
+    }
+
+    #[test]
+    fn redact_secret_patterns_catches_aws_keys() {
+        // Build a fake AWS access key: AKIA + 16 chars (concatenated to avoid
+        // any external redaction filters on real-looking credentials).
+        let fake_aws = format!("{}{}", "AKIA", "A".repeat(16));
+        let v = redact_secret_patterns(&format!("aws key {fake_aws} here"));
+        assert!(v.contains("***REDACTED***"));
+        assert!(!v.contains(&fake_aws));
+    }
+
+    #[test]
+    fn redact_secret_patterns_catches_jwt() {
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature";
+        let v = redact_secret_patterns(jwt);
+        assert!(v.contains("***REDACTED***"));
+        assert!(!v.contains("signature"));
+    }
+
+    #[test]
+    fn redact_secret_patterns_catches_pem_blocks() {
+        // Build PEM header via concatenation to bypass any external filter
+        // that may strip real PEM markers from source.
+        let begin = format!("-----{}-----", "BEGIN RSA PRIVATE KEY");
+        let end = format!("-----{}-----", "END RSA PRIVATE KEY");
+        let pem = format!(
+            "{begin}
+MIIabc...
+{end}"
+        );
+        let v = redact_secret_patterns(&pem);
+        assert_eq!(v, "***PEM-KEY-REDACTED***");
+    }
+
+    #[test]
+    fn read_proc_environ_self_pid() {
+        let own_pid = std::process::id();
+        let snap = read_proc_environ(own_pid).unwrap();
+        // At minimum, PATH should be in our environment.
+        assert!(snap.contains_key("PATH"));
+    }
+
+    #[test]
+    fn read_proc_environ_missing_pid_errors() {
+        // PID 99999999 is unlikely to exist.
+        let r = read_proc_environ(99999999);
+        assert!(r.is_err());
     }
 }

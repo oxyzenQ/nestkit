@@ -42,12 +42,18 @@ pub fn run(git_hash: &str) -> Result<(), Box<dyn Error>> {
     let checks = collect_checks(git_hash);
     let summary = summarize(&checks);
     println!("{}", format_report(&checks, summary, git_hash));
+    // Non-zero exit on FAIL so CI / automation can gate on doctor.
+    if summary.fail > 0 {
+        return Err("doctor checks failed".into());
+    }
     Ok(())
 }
 
 fn collect_checks(git_hash: &str) -> Vec<CheckResult> {
     vec![
         check_os(),
+        check_kernel_distro(),
+        check_container(),
         check_procfs(Path::new("/proc")),
         check_visible_pids(Path::new("/proc")),
         check_proc_access(Path::new("/proc/1/comm")),
@@ -58,6 +64,96 @@ fn collect_checks(git_hash: &str) -> Vec<CheckResult> {
         check_systemctl("systemctl"),
         check_build_metadata(git_hash),
     ]
+}
+
+fn check_kernel_distro() -> CheckResult {
+    let kernel = run_uname_r().unwrap_or_else(|| "unknown".to_owned());
+    let distro = read_distro().unwrap_or_else(|| "unknown".to_owned());
+    CheckResult {
+        status: CheckStatus::Ok,
+        check: "kernel",
+        message: format!("{kernel} | {distro}"),
+    }
+}
+
+fn run_uname_r() -> Option<String> {
+    let out = Command::new("uname").arg("-r").output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    if s.is_empty() { None } else { Some(s) }
+}
+
+fn read_distro() -> Option<String> {
+    let content = fs::read_to_string("/etc/os-release").ok()?;
+    let mut name = None;
+    let mut version = None;
+    for line in content.lines() {
+        if let Some(v) = line.strip_prefix("PRETTY_NAME=") {
+            return Some(v.trim_matches('"').to_owned());
+        }
+        if let Some(v) = line.strip_prefix("NAME=") {
+            name = Some(v.trim_matches('"').to_owned());
+        }
+        if let Some(v) = line.strip_prefix("VERSION=") {
+            version = Some(v.trim_matches('"').to_owned());
+        }
+    }
+    match (name, version) {
+        (Some(n), Some(v)) => Some(format!("{n} {v}")),
+        (Some(n), None) => Some(n),
+        _ => None,
+    }
+}
+
+fn check_container() -> CheckResult {
+    let mut evidence = Vec::new();
+    // /.dockerenv is the classic Docker marker
+    if Path::new("/.dockerenv").exists() {
+        evidence.push("/.dockerenv".to_owned());
+    }
+    // /run/.containerenv is the podman marker
+    if Path::new("/run/.containerenv").exists() {
+        evidence.push("/run/.containerenv".to_owned());
+    }
+    // /proc/1/cgroup containing /docker/ or /kubepods/ indicates a container
+    if let Ok(cg) = fs::read_to_string("/proc/1/cgroup") {
+        if cg.contains("/docker/") || cg.contains("/kubepods/") || cg.contains("/lxc/") {
+            evidence.push("cgroup indicates container".to_owned());
+        }
+    }
+    // /proc/1/sched shows the init process name; in containers it's not "systemd" or "init"
+    if let Ok(sched) = fs::read_to_string("/proc/1/sched") {
+        let first_line = sched.lines().next().unwrap_or("");
+        // In a real host, PID 1 is usually systemd/init. In a container it's
+        // typically the entrypoint binary.
+        if !first_line.contains("systemd")
+            && !first_line.contains("init")
+            && !first_line.contains("/sbin/init")
+            && !first_line.is_empty()
+        {
+            // Only flag if other evidence also present, to avoid false positives
+            // on minimal hosts
+            if !evidence.is_empty() {
+                evidence.push(format!("pid 1: {first_line}"));
+            }
+        }
+    }
+
+    if evidence.is_empty() {
+        CheckResult {
+            status: CheckStatus::Ok,
+            check: "container",
+            message: "bare-metal or VM (no container markers found)".to_owned(),
+        }
+    } else {
+        CheckResult {
+            status: CheckStatus::Warn,
+            check: "container",
+            message: format!("running inside container ({})", evidence.join(", ")),
+        }
+    }
 }
 
 fn format_report(checks: &[CheckResult], summary: Summary, git_hash: &str) -> String {

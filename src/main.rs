@@ -11,6 +11,7 @@ mod path;
 mod pathguard;
 mod port;
 mod proc;
+mod process;
 mod recent;
 mod service;
 mod shell;
@@ -94,7 +95,15 @@ fn main() {
             keys,
             filter,
             no_values,
-        }) => env::run(command, keys || no_values, filter.as_deref()),
+            pid,
+            mask_secrets,
+        }) => env::run(
+            command,
+            keys || no_values,
+            filter.as_deref(),
+            pid,
+            mask_secrets,
+        ),
         Some(cli::Commands::Service {
             system,
             user,

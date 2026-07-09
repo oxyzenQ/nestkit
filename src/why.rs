@@ -334,6 +334,7 @@ mod tests {
             source: EvidenceSource::Metadata,
             actor: "unknown".to_owned(),
             process: None,
+            meta: None,
         });
 
         assert!(output.contains("reason: path exists and has modification evidence"));
@@ -354,6 +355,7 @@ mod tests {
                 name: "sudo".to_owned(),
                 pid: Some(230261),
             }),
+            meta: None,
         });
 
         assert!(output.contains("reason: path has recent modification evidence"));
@@ -404,6 +406,7 @@ mod tests {
             source: EvidenceSource::Metadata,
             actor: "unknown".to_owned(),
             process: None,
+            meta: None,
         });
 
         assert!(!output.contains("definitely"));
@@ -418,6 +421,7 @@ mod tests {
             source: EvidenceSource::Metadata,
             actor: "unknown".to_owned(),
             process: None,
+            meta: None,
         });
 
         assert!(!output.contains("try sudo for complete explanation"));

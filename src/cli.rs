@@ -147,6 +147,17 @@ pub enum Commands {
         filter: Option<String>,
         #[arg(long, help = "Alias for --keys")]
         no_values: bool,
+        #[arg(
+            long,
+            value_name = "PID",
+            help = "Read environment from /proc/<PID>/environ instead of this process"
+        )]
+        pid: Option<u32>,
+        #[arg(
+            long,
+            help = "Mask common secret patterns (AWS, GitHub, JWT, private keys)"
+        )]
+        mask_secrets: bool,
     },
     #[command(about = "Inspect systemd services (read-only)")]
     Service {
