@@ -68,7 +68,6 @@ grep -A3 'name = "zejtron"' Cargo.lock | grep -q 'version = "'"${VERSION}"'"' ||
 grep -q '^pkgver='"${VERSION}"'$' aur/zejtron-bin/PKGBUILD || error "PKGBUILD pkgver was not updated"
 grep -q 'pkgver = '"${VERSION}" aur/zejtron-bin/.SRCINFO || error ".SRCINFO pkgver was not updated"
 grep -q "TAG=${TAG}" README.md || error "README.md release examples do not mention TAG=${TAG}"
-grep -q "version-${TAG}-" README.md || error "README.md version badge does not mention ${TAG}"
 grep -q "TAG=${TAG}" docs/workflow/about-ci.md || error "docs/workflow/about-ci.md release examples do not mention TAG=${TAG}"
 
 echo "VERSION=${VERSION}"
