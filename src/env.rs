@@ -64,18 +64,11 @@ fn current_environment() -> Snapshot {
 }
 
 fn data_dir() -> Result<PathBuf, EnvError> {
-    if let Some(path) = env::var_os("XDG_DATA_HOME").filter(|value| !value.is_empty()) {
-        return Ok(PathBuf::from(path).join("zejtron").join("env"));
-    }
-
-    let home = env::var_os("HOME")
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| EnvError("HOME is required when XDG_DATA_HOME is not set".to_owned()))?;
-    Ok(PathBuf::from(home)
-        .join(".local")
-        .join("share")
-        .join("zejtron")
-        .join("env"))
+    // Delegate to pathguard: resolves $XDG_DATA_HOME/zejtron or
+    // ~/.local/share/zejtron, and rejects XDG overrides pointing to system
+    // or credential paths (/etc, ~/.ssh, etc.).
+    let base = crate::pathguard::resolve_state_dir().map_err(EnvError)?;
+    Ok(base.join("env"))
 }
 
 pub fn validate_snapshot_name(name: &str) -> Result<(), EnvError> {

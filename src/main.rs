@@ -8,6 +8,7 @@ mod git;
 mod holds;
 mod net;
 mod path;
+mod pathguard;
 mod port;
 mod proc;
 mod recent;
