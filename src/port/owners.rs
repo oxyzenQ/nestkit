@@ -35,7 +35,7 @@ pub(crate) fn map_socket_owners(
             Err(_) => continue,
         };
 
-        let mut matched_inodes = BTreeSet::new();
+        let mut matched_inodes: BTreeSet<(u64, Option<i32>)> = BTreeSet::new();
         for fd_entry in fd_entries {
             let Ok(fd_entry) = fd_entry else {
                 stats.unreadable_fds += 1;
@@ -53,7 +53,11 @@ pub(crate) fn map_socket_owners(
                 continue;
             };
             if wanted_inodes.contains(&inode) {
-                matched_inodes.insert(inode);
+                let fd_num = fd_entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|s| s.parse::<i32>().ok());
+                matched_inodes.insert((inode, fd_num));
             }
         }
 
@@ -61,9 +65,14 @@ pub(crate) fn map_socket_owners(
             continue;
         }
 
-        let process = read_process_info(&process_dir, pid);
-        for inode in matched_inodes {
-            owners.entry(inode).or_default().push(process.clone());
+        let mut process = read_process_info(&process_dir, pid);
+        // Read cmdline once per process to share across all its sockets
+        process.cmdline = crate::process::read_cmdline(Path::new("/proc"), pid);
+
+        for (inode, fd) in matched_inodes {
+            let mut entry = process.clone();
+            entry.fd = fd;
+            owners.entry(inode).or_default().push(entry);
         }
     }
 
@@ -103,6 +112,8 @@ fn read_process_info(process_dir: &Path, pid: u32) -> ProcessInfo {
         name,
         user,
         cwd,
+        cmdline: None,
+        fd: None,
     }
 }
 

@@ -105,6 +105,8 @@ mod tests {
             port,
             state: state.map(ToOwned::to_owned),
             inode,
+            remote_address: "0.0.0.0".to_owned(),
+            remote_port: 0,
         }
     }
 
@@ -292,6 +294,8 @@ mod tests {
             name: "node".to_owned(),
             user: "rezky".to_owned(),
             cwd: None,
+            cmdline: None,
+            fd: None,
         };
         assert_eq!(format_owner(&process, true), "node user=rezky");
     }

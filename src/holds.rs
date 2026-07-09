@@ -37,15 +37,78 @@ pub(crate) struct Holder {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Evidence {
-    Fd(i32),
-    Mmap,
+    Fd(i32, FdMode),
+    Mmap(MmapPerms),
+}
+
+/// FD access mode decoded from /proc/<pid>/fdinfo/<fd> flags field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum FdMode {
+    Read,
+    Write,
+    ReadWrite,
+    Unknown,
+}
+
+impl FdMode {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Read => "r",
+            Self::Write => "w",
+            Self::ReadWrite => "rw",
+            Self::Unknown => "?",
+        }
+    }
+
+    pub(crate) fn from_flags(flags: u64) -> Self {
+        // O_RDONLY=0, O_WRONLY=1, O_RDWR=2 — lower 2 bits of flags
+        match flags & 0o3 {
+            0 => Self::Read,
+            1 => Self::Write,
+            2 => Self::ReadWrite,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// mmap permissions decoded from /proc/<pid>/maps column 2 (e.g., "r-xp").
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct MmapPerms {
+    pub(crate) read: bool,
+    pub(crate) write: bool,
+    pub(crate) execute: bool,
+    pub(crate) private: bool,
+}
+
+impl MmapPerms {
+    pub(crate) fn label(&self) -> String {
+        let mut s = String::with_capacity(4);
+        s.push(if self.read { 'r' } else { '-' });
+        s.push(if self.write { 'w' } else { '-' });
+        s.push(if self.execute { 'x' } else { '-' });
+        s.push(if self.private { 'p' } else { 's' });
+        s
+    }
+
+    pub(crate) fn parse(s: &str) -> Option<Self> {
+        if s.len() != 4 {
+            return None;
+        }
+        let bytes = s.as_bytes();
+        Some(Self {
+            read: bytes[0] == b'r',
+            write: bytes[1] == b'w',
+            execute: bytes[2] == b'x',
+            private: bytes[3] == b'p',
+        })
+    }
 }
 
 impl Evidence {
     pub(crate) fn label(&self) -> String {
         match self {
-            Self::Fd(fd) => format!("fd {fd}"),
-            Self::Mmap => "mmap".to_owned(),
+            Self::Fd(fd, mode) => format!("fd {fd} ({})", mode.label()),
+            Self::Mmap(perms) => format!("mmap {}", perms.label()),
         }
     }
 }
@@ -96,6 +159,7 @@ struct MapEntry {
     dev_major: u32,
     dev_minor: u32,
     inode: u64,
+    perms: MmapPerms,
 }
 
 pub fn run(target: &str) -> Result<(), Box<dyn Error>> {
@@ -162,7 +226,7 @@ pub(crate) fn scan_path_holders(path: &Path) -> Result<(Vec<Holder>, ScanStats),
         let mut evidence = Vec::new();
         match scan_pid_fds_for_file(pid, target) {
             ProcRead::Ok(mut fds) => {
-                evidence.extend(fds.drain(..).map(Evidence::Fd));
+                evidence.extend(fds.drain(..).map(|(fd, mode)| Evidence::Fd(fd, mode)));
             }
             ProcRead::PermissionDenied => stats.unreadable_processes += 1,
             ProcRead::Gone => continue,
@@ -170,8 +234,8 @@ pub(crate) fn scan_path_holders(path: &Path) -> Result<(Vec<Holder>, ScanStats),
         }
 
         match scan_pid_maps_for_file(pid, target_major, target_minor, target.inode) {
-            ProcRead::Ok(true) => evidence.push(Evidence::Mmap),
-            ProcRead::Ok(false) => {}
+            ProcRead::Ok(Some(perms)) => evidence.push(Evidence::Mmap(perms)),
+            ProcRead::Ok(None) => {}
             ProcRead::PermissionDenied => stats.unreadable_maps += 1,
             ProcRead::Gone => continue,
             ProcRead::Fatal(error) => return Err(HoldsError(error.to_string())),
@@ -202,7 +266,13 @@ fn scan_socket_holders(
     for pid in pids {
         match scan_pid_fds_for_sockets(pid, target_inodes) {
             ProcRead::Ok(fds) if !fds.is_empty() => {
-                let mut evidence: Vec<Evidence> = fds.into_iter().map(Evidence::Fd).collect();
+                let mut evidence: Vec<Evidence> = fds
+                    .into_iter()
+                    .map(|fd| {
+                        let mode = read_fd_mode(pid, fd);
+                        Evidence::Fd(fd, mode)
+                    })
+                    .collect();
                 evidence.sort();
                 evidence.dedup();
                 if let Some(holder) = read_holder(pid, evidence) {
@@ -294,22 +364,23 @@ fn append_holder_lines(lines: &mut Vec<String>, holders: &[Holder], show_cwd: bo
             holder.name, holder.pid, holder.user
         ));
 
-        if show_cwd && let Some(cwd) = &holder.cwd {
-            lines.push(format!("{child_indent}cwd {}", cwd.display()));
+        // Build a list of sub-rows: cwd first (if requested), then evidence.
+        let mut sub_rows: Vec<String> = Vec::new();
+        if show_cwd {
+            if let Some(cwd) = &holder.cwd {
+                sub_rows.push(format!("cwd {}", cwd.display()));
+            } else {
+                sub_rows.push("cwd (unreadable)".to_owned());
+            }
+        }
+        for evidence in &holder.evidence {
+            sub_rows.push(evidence.label());
         }
 
-        if !show_cwd {
-            for (evidence_index, evidence) in holder.evidence.iter().enumerate() {
-                let evidence_branch = if evidence_index + 1 == holder.evidence.len() {
-                    "└──"
-                } else {
-                    "├──"
-                };
-                lines.push(format!(
-                    "{child_indent}{evidence_branch} {}",
-                    evidence.label()
-                ));
-            }
+        for (sub_index, row) in sub_rows.iter().enumerate() {
+            let sub_last = sub_index + 1 == sub_rows.len();
+            let sub_branch = if sub_last { "└──" } else { "├──" };
+            lines.push(format!("{child_indent}{sub_branch} {row}"));
         }
     }
 }
@@ -359,7 +430,7 @@ fn list_pids() -> io::Result<Vec<u32>> {
     Ok(pids)
 }
 
-fn scan_pid_fds_for_file(pid: u32, target: FileId) -> ProcRead<Vec<i32>> {
+fn scan_pid_fds_for_file(pid: u32, target: FileId) -> ProcRead<Vec<(i32, FdMode)>> {
     let fd_entries = match fs::read_dir(format!("/proc/{pid}/fd")) {
         Ok(entries) => entries,
         Err(error) => return classify_proc_error(error),
@@ -384,7 +455,10 @@ fn scan_pid_fds_for_file(pid: u32, target: FileId) -> ProcRead<Vec<i32>> {
             continue;
         };
         match fs::metadata(fd_entry.path()) {
-            Ok(metadata) if FileId::from_metadata(&metadata) == target => fds.push(fd),
+            Ok(metadata) if FileId::from_metadata(&metadata) == target => {
+                let mode = read_fd_mode(pid, fd);
+                fds.push((fd, mode));
+            }
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
                 return ProcRead::PermissionDenied;
@@ -393,8 +467,24 @@ fn scan_pid_fds_for_file(pid: u32, target: FileId) -> ProcRead<Vec<i32>> {
         }
     }
 
-    fds.sort_unstable();
+    fds.sort_unstable_by_key(|a| a.0);
     ProcRead::Ok(fds)
+}
+
+/// Read /proc/<pid>/fdinfo/<fd> and parse the `flags:` field to determine
+/// the FD access mode (O_RDONLY=0, O_WRONLY=1, O_RDWR=2). Returns
+/// FdMode::Unknown when fdinfo is unreadable or the flags line is missing.
+fn read_fd_mode(pid: u32, fd: i32) -> FdMode {
+    let Ok(content) = fs::read_to_string(format!("/proc/{pid}/fdinfo/{fd}")) else {
+        return FdMode::Unknown;
+    };
+    for line in content.lines() {
+        if let Some(rest) = line.strip_prefix("flags:") {
+            let flags = rest.trim().parse::<u64>().unwrap_or(0);
+            return FdMode::from_flags(flags);
+        }
+    }
+    FdMode::Unknown
 }
 
 fn scan_pid_fds_for_sockets(pid: u32, target_inodes: &BTreeSet<u64>) -> ProcRead<Vec<i32>> {
@@ -442,7 +532,7 @@ fn scan_pid_maps_for_file(
     target_major: u32,
     target_minor: u32,
     target_inode: u64,
-) -> ProcRead<bool> {
+) -> ProcRead<Option<MmapPerms>> {
     let maps = match read_proc_maps(pid) {
         ProcRead::Ok(maps) => maps,
         ProcRead::PermissionDenied => return ProcRead::PermissionDenied,
@@ -456,10 +546,10 @@ fn scan_pid_maps_for_file(
             && entry.dev_major == target_major
             && entry.dev_minor == target_minor
         {
-            return ProcRead::Ok(true);
+            return ProcRead::Ok(Some(entry.perms));
         }
     }
-    ProcRead::Ok(false)
+    ProcRead::Ok(None)
 }
 
 fn read_proc_maps(pid: u32) -> ProcRead<Vec<MapEntry>> {
@@ -476,9 +566,9 @@ fn read_proc_maps(pid: u32) -> ProcRead<Vec<MapEntry>> {
             Err(error) => return classify_proc_error(error),
         };
         let mut parts = line.split_whitespace();
-        parts.next();
-        parts.next();
-        parts.next();
+        parts.next(); // address range (col 1)
+        let perms_str = parts.next(); // perms (col 2: "r-xp")
+        parts.next(); // offset (col 3)
         let Some(dev) = parts.next() else {
             continue;
         };
@@ -488,10 +578,17 @@ fn read_proc_maps(pid: u32) -> ProcRead<Vec<MapEntry>> {
         let Some((dev_major, dev_minor)) = parse_dev_hex(dev) else {
             continue;
         };
+        let perms = perms_str.and_then(MmapPerms::parse).unwrap_or(MmapPerms {
+            read: false,
+            write: false,
+            execute: false,
+            private: true,
+        });
         entries.push(MapEntry {
             dev_major,
             dev_minor,
             inode,
+            perms,
         });
     }
 
@@ -629,25 +726,25 @@ mod tests {
 
     #[test]
     fn renders_one_port_holder() {
-        let mut row = holder(1234, "bun", vec![Evidence::Fd(8)]);
+        let mut row = holder(1234, "bun", vec![Evidence::Fd(8, FdMode::Read)]);
         row.cwd = Some(PathBuf::from("/home/rezky/project"));
 
         assert_eq!(
             format_port_report(3000, &[row], &ScanStats::default()),
-            ":3000\n└── bun pid=1234 user=rezky\n    cwd /home/rezky/project\n\n1 holder"
+            ":3000\n└── bun pid=1234 user=rezky\n    ├── cwd /home/rezky/project\n    └── fd 8 (r)\n\n1 holder"
         );
     }
 
     #[test]
     fn renders_multiple_port_holders() {
-        let mut first = holder(1234, "bun", vec![Evidence::Fd(8)]);
+        let mut first = holder(1234, "bun", vec![Evidence::Fd(8, FdMode::Read)]);
         first.cwd = Some(PathBuf::from("/home/rezky/project"));
-        let mut second = holder(2222, "node", vec![Evidence::Fd(9)]);
+        let mut second = holder(2222, "node", vec![Evidence::Fd(9, FdMode::Read)]);
         second.cwd = Some(PathBuf::from("/home/rezky/other"));
 
         assert_eq!(
             format_port_report(3000, &[first, second], &ScanStats::default()),
-            ":3000\n├── bun pid=1234 user=rezky\n│   cwd /home/rezky/project\n└── node pid=2222 user=rezky\n    cwd /home/rezky/other\n\n2 holders"
+            ":3000\n├── bun pid=1234 user=rezky\n│   ├── cwd /home/rezky/project\n│   └── fd 8 (r)\n└── node pid=2222 user=rezky\n    ├── cwd /home/rezky/other\n    └── fd 9 (r)\n\n2 holders"
         );
     }
 
@@ -664,10 +761,10 @@ mod tests {
         assert_eq!(
             format_path_report(
                 "/tmp/file with spaces",
-                &[holder(1234, "cat", vec![Evidence::Fd(12)])],
+                &[holder(1234, "cat", vec![Evidence::Fd(12, FdMode::Read)])],
                 &ScanStats::default()
             ),
-            "/tmp/file with spaces\n└── cat pid=1234 user=rezky\n    └── fd 12\n\n1 holder"
+            "/tmp/file with spaces\n└── cat pid=1234 user=rezky\n    └── fd 12 (r)\n\n1 holder"
         );
     }
 
@@ -676,10 +773,22 @@ mod tests {
         assert_eq!(
             format_path_report(
                 "/tmp/lib.so",
-                &[holder(1234, "app", vec![Evidence::Fd(4), Evidence::Mmap])],
+                &[holder(
+                    1234,
+                    "app",
+                    vec![
+                        Evidence::Fd(4, FdMode::Read),
+                        Evidence::Mmap(MmapPerms {
+                            read: true,
+                            write: false,
+                            execute: false,
+                            private: true
+                        })
+                    ]
+                )],
                 &ScanStats::default()
             ),
-            "/tmp/lib.so\n└── app pid=1234 user=rezky\n    ├── fd 4\n    └── mmap\n\n1 holder"
+            "/tmp/lib.so\n└── app pid=1234 user=rezky\n    ├── fd 4 (r)\n    └── mmap r--p\n\n1 holder"
         );
     }
 
@@ -716,7 +825,7 @@ mod tests {
 
     #[test]
     fn vanished_holder_is_skipped() {
-        assert!(read_holder(u32::MAX, vec![Evidence::Fd(1)]).is_none());
+        assert!(read_holder(u32::MAX, vec![Evidence::Fd(1, FdMode::Read)]).is_none());
     }
 
     #[test]
@@ -739,8 +848,8 @@ mod tests {
     #[test]
     fn stable_summary_counts() {
         let holders = vec![
-            holder(1, "one", vec![Evidence::Fd(1)]),
-            holder(2, "two", vec![Evidence::Fd(2)]),
+            holder(1, "one", vec![Evidence::Fd(1, FdMode::Read)]),
+            holder(2, "two", vec![Evidence::Fd(2, FdMode::Read)]),
         ];
 
         assert!(

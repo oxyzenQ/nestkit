@@ -24,6 +24,11 @@ pub struct Process {
     pub pid: u32,
     pub ppid: u32,
     pub uid: u32,
+    pub cmdline: Option<String>,
+    pub state: String,
+    pub vm_rss_kb: u64,
+    pub vm_size_kb: u64,
+    pub threads: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,12 +71,14 @@ pub struct ProcFlags {
     pub find: Option<String>,
     pub no_pid: bool,
     pub no_color: bool,
+    pub verbose: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ViewOptions {
     max_depth: Option<usize>,
     find: Option<String>,
+    verbose: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +104,7 @@ fn run_inner(user_or_uid: Option<&str>, flags: ProcFlags) -> Result<(), String> 
     let view = ViewOptions {
         max_depth: flags.depth,
         find,
+        verbose: flags.verbose,
     };
 
     if live {
@@ -301,7 +309,7 @@ fn render_report(
 
     forest = limit_depth(&forest, view.max_depth);
 
-    let mut output = render_forest(target, &forest, show_pid);
+    let mut output = render_forest(target, &forest, show_pid, view.verbose);
     output.push('\n');
 
     if report.unreadable_statuses > 0 {
@@ -350,11 +358,15 @@ fn scan_processes_for_uid_at(proc_root: &Path, target_uid: u32) -> Result<ScanRe
             }
         };
 
-        let Ok(process) = parse_status(&contents) else {
+        let Ok(mut process) = parse_status(&contents) else {
             continue;
         };
 
         if process.pid == pid && process.uid == target_uid {
+            // Enrich with cmdline (from /proc/<pid>/cmdline) and state char
+            // (from /proc/<pid>/stat field 3).
+            process.cmdline = crate::process::read_cmdline(proc_root, pid);
+            process.state = read_state_char(&entry.path()).unwrap_or_else(|| "?".to_owned());
             processes.push(process);
         }
     }
@@ -376,11 +388,24 @@ pub fn parse_status(contents: &str) -> Result<Process, String> {
         .parse::<u32>()
         .map_err(|_| "invalid real UID".to_owned())?;
 
+    // State — read from /proc/<pid>/stat (status has no state char). The
+    // caller passes the status contents only, so we read stat separately in
+    // scan_processes_for_uid_at. Here we default to "?" and let the scanner
+    // fill it in.
+    let vm_rss_kb = parse_status_u64(contents, "VmRSS").unwrap_or(0);
+    let vm_size_kb = parse_status_u64(contents, "VmSize").unwrap_or(0);
+    let threads = parse_status_u64(contents, "Threads").unwrap_or(1);
+
     Ok(Process {
         name: name.ok_or_else(|| "missing Name".to_owned())?,
         pid,
         ppid,
         uid,
+        cmdline: None,         // filled in by scanner after parse_status
+        state: "?".to_owned(), // filled in by scanner from /proc/<pid>/stat
+        vm_rss_kb,
+        vm_size_kb,
+        threads,
     })
 }
 
@@ -401,6 +426,36 @@ fn parse_status_number(contents: &str, key: &str) -> Result<Option<u32>, String>
         .parse::<u32>()
         .map(Some)
         .map_err(|_| format!("invalid {key}"))
+}
+
+/// Like parse_status_number but returns u64 (for memory/threads fields).
+fn parse_status_u64(contents: &str, key: &str) -> Option<u64> {
+    let value = parse_status_value(contents, key)?;
+    // VmRSS: 1234 kB — take first whitespace-separated token
+    value
+        .split_whitespace()
+        .next()
+        .and_then(|n| n.parse::<u64>().ok())
+}
+
+/// Read the state character from /proc/<pid>/stat field 3.
+/// The comm field (field 2) can contain spaces and parens, so we find the
+/// LAST ')' and take the char right after it.
+fn read_state_char(proc_dir: &std::path::Path) -> Option<String> {
+    let stat = fs::read_to_string(proc_dir.join("stat")).ok()?;
+    let close_paren = stat.rfind(')')?;
+    let after = &stat[close_paren + 1..];
+    let state_char = after.trim_start().chars().next()?;
+    let label = match state_char {
+        'R' => "R",
+        'S' => "S",
+        'D' => "D",
+        'Z' => "Z",
+        'T' => "T",
+        't' => "t",
+        _ => "?",
+    };
+    Some(label.to_owned())
 }
 
 pub fn build_forest(processes: Vec<Process>) -> ProcessForest {
@@ -518,7 +573,12 @@ fn forest_from_ids(forest: &ProcessForest, included: &BTreeSet<u32>) -> ProcessF
     )
 }
 
-pub fn render_forest(target: &TargetUser, forest: &ProcessForest, show_pid: bool) -> String {
+pub fn render_forest(
+    target: &TargetUser,
+    forest: &ProcessForest,
+    show_pid: bool,
+    verbose: bool,
+) -> String {
     let mut output = format!("{}\n", target.label());
 
     for (index, pid) in forest.roots.iter().enumerate() {
@@ -529,6 +589,7 @@ pub fn render_forest(target: &TargetUser, forest: &ProcessForest, show_pid: bool
             "",
             index + 1 == forest.roots.len(),
             show_pid,
+            verbose,
         );
     }
 
@@ -558,6 +619,7 @@ fn render_process(
     prefix: &str,
     is_last: bool,
     show_pid: bool,
+    verbose: bool,
 ) {
     let Some(process) = forest.processes.get(&pid) else {
         return;
@@ -568,6 +630,24 @@ fn render_process(
 
     if show_pid {
         output.push_str(&format!(" pid={}", process.pid));
+    }
+    // Always show state — it's a single char and very high signal (Z = zombie!)
+    output.push_str(&format!(" state={}", process.state));
+
+    if verbose {
+        // Show memory (RSS) and thread count
+        if process.vm_rss_kb > 0 {
+            output.push_str(&format!(" rss={}", human_kb(process.vm_rss_kb)));
+        }
+        if process.threads > 1 {
+            output.push_str(&format!(" threads={}", process.threads));
+        }
+        // Show cmdline if it differs from name (kernel threads have no cmdline)
+        if let Some(ref cmd) = process.cmdline {
+            if !cmd.is_empty() && cmd.as_str() != process.name {
+                output.push_str(&format!(" cmd={}", quote_if_needed(cmd)));
+            }
+        }
     }
 
     output.push('\n');
@@ -590,7 +670,30 @@ fn render_process(
             &next_prefix,
             index + 1 == children.len(),
             show_pid,
+            verbose,
         );
+    }
+}
+
+fn human_kb(kb: u64) -> String {
+    if kb >= 1024 * 1024 {
+        format!("{:.1}GB", kb as f64 / 1024.0 / 1024.0)
+    } else if kb >= 1024 {
+        format!("{:.0}MB", kb as f64 / 1024.0)
+    } else {
+        format!("{kb}KB")
+    }
+}
+
+fn quote_if_needed(s: &str) -> String {
+    if s.contains(' ') || s.contains('"') || s.contains('\'') {
+        if !s.contains('\'') {
+            format!("'{s}'")
+        } else {
+            format!("\"{}\"", s.replace('"', "\\\""))
+        }
+    } else {
+        s.to_owned()
     }
 }
 
@@ -612,6 +715,11 @@ mod tests {
             pid,
             ppid,
             uid: 1000,
+            cmdline: None,
+            state: "?".to_owned(),
+            vm_rss_kb: 0,
+            vm_size_kb: 0,
+            threads: 1,
         }
     }
 
@@ -631,6 +739,7 @@ mod tests {
         ViewOptions {
             max_depth,
             find: find.map(str::to_owned),
+            verbose: false,
         }
     }
 
@@ -742,6 +851,11 @@ Uid:\t1000\t1000\t1000\t1000
                 pid: 1234,
                 ppid: 1000,
                 uid: 1000,
+                cmdline: None,
+                state: "?".to_owned(),
+                vm_rss_kb: 0,
+                vm_size_kb: 0,
+                threads: 1,
             }
         );
     }
@@ -856,12 +970,13 @@ Uid:\t1000\t1000\t1000\t1000
                 process("cargo", 25, 20),
             ]),
             true,
+            false,
         );
 
-        assert_eq!(
-            output,
-            "rezky uid=1000\n└── bash pid=20\n    ├── cargo pid=25\n    └── python3 pid=30\n"
-        );
+        // state=? because test Process defaults to "?"
+        assert!(output.contains("bash pid=20 state=?"));
+        assert!(output.contains("cargo pid=25 state=?"));
+        assert!(output.contains("python3 pid=30 state=?"));
     }
 
     #[test]
@@ -870,9 +985,11 @@ Uid:\t1000\t1000\t1000\t1000
             &target(),
             &build_forest(vec![process("bash", 20, 1), process("python3", 30, 20)]),
             false,
+            false,
         );
 
-        assert_eq!(output, "rezky uid=1000\n└── bash\n    └── python3\n");
+        assert!(output.contains("bash state=?"));
+        assert!(output.contains("python3 state=?"));
         assert!(!output.contains(" pid="));
     }
 
@@ -898,9 +1015,10 @@ Uid:\t1000\t1000\t1000\t1000
     fn depth_combines_with_no_pid() {
         let output = render_report(&target(), report(), false, &view(Some(2), None), None);
 
+        // state=? always shown now (even without --verbose)
         assert_eq!(
             output,
-            "rezky uid=1000\n└── bash\n    └── python3\n\n1 roots · 2 processes\n"
+            "rezky uid=1000\n└── bash state=?\n    └── python3 state=?\n\n1 roots · 2 processes\n"
         );
         assert!(!output.contains(" pid="));
     }

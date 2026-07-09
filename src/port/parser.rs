@@ -49,9 +49,11 @@ pub fn parse_proc_net_content(content: &str, protocol: Protocol, ipv6: bool) -> 
 pub fn parse_proc_net_line(line: &str, protocol: Protocol, ipv6: bool) -> Option<SocketEntry> {
     let columns: Vec<&str> = line.split_whitespace().collect();
     let local = *columns.get(1)?;
+    let remote = *columns.get(2)?;
     let state_code = *columns.get(3)?;
     let inode = columns.get(9)?.parse().ok()?;
     let (address, port) = parse_local_address(local, ipv6)?;
+    let (remote_address, remote_port) = parse_local_address(remote, ipv6).unwrap_or_default();
     let state = match protocol {
         Protocol::Tcp => Some(tcp_state_name(state_code).to_owned()),
         Protocol::Udp => None,
@@ -61,6 +63,8 @@ pub fn parse_proc_net_line(line: &str, protocol: Protocol, ipv6: bool) -> Option
         protocol,
         address,
         port,
+        remote_address,
+        remote_port,
         state,
         inode,
     })

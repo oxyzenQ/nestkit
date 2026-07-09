@@ -74,6 +74,7 @@ fn main() {
             find,
             no_pid,
             no_color,
+            verbose,
         }) => proc::run(
             user_or_uid.as_deref(),
             proc::ProcFlags {
@@ -85,6 +86,7 @@ fn main() {
                 find,
                 no_pid,
                 no_color,
+                verbose,
             },
         ),
         Some(cli::Commands::Holds { target }) => holds::run(&target),
@@ -105,12 +107,14 @@ fn main() {
             mask_secrets,
         ),
         Some(cli::Commands::Service {
+            unit,
             system,
             user,
             failed,
             all,
             filter,
         }) => service::run(service::ServiceFlags {
+            unit,
             system,
             user,
             failed,

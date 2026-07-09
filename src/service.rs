@@ -17,6 +17,7 @@ pub struct ServiceUnit {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceFlags {
+    pub unit: Option<String>,
     pub system: bool,
     pub user: bool,
     pub failed: bool,
@@ -50,7 +51,18 @@ impl fmt::Display for ServiceError {
 impl Error for ServiceError {}
 
 pub fn run(flags: ServiceFlags) -> Result<(), Box<dyn Error>> {
+    // Parse options once. The unit field is consumed by parse_options via Clone.
+    let unit_name = flags.unit.clone();
     let options = parse_options(flags)?;
+
+    // If a unit name is given, show detail mode (systemctl show <unit>).
+    if let Some(unit) = unit_name.as_deref() {
+        let detail = query_unit_detail(&options, unit)?;
+        let output = format_unit_detail(&detail);
+        println!("{output}");
+        return Ok(());
+    }
+
     let output = if options.failed {
         let failed = filter_services(
             query_services(&options, QueryMode::Failed)?,
@@ -71,6 +83,161 @@ pub fn run(flags: ServiceFlags) -> Result<(), Box<dyn Error>> {
     };
     println!("{output}");
     Ok(())
+}
+
+/// Detailed unit info gathered from `systemctl show <unit>`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UnitDetail {
+    pub name: String,
+    pub description: String,
+    pub load_state: String,
+    pub active_state: String,
+    pub sub_state: String,
+    pub main_pid: Option<u32>,
+    pub exec_start: String,
+    pub fragment_path: String,
+    pub active_enter_timestamp: String,
+    pub n_restarts: Option<u64>,
+    pub memory_current: Option<u64>,
+    pub cpu_usage_nsec: Option<u64>,
+    pub tasks_current: Option<u64>,
+    pub wants: Vec<String>,
+    pub requires: Vec<String>,
+    pub wanted_by: Vec<String>,
+}
+
+fn query_unit_detail(options: &ServiceOptions, unit: &str) -> Result<UnitDetail, ServiceError> {
+    let mut cmd = Command::new("systemctl");
+    if options.scope == ServiceScope::User {
+        cmd.arg("--user");
+    }
+    cmd.args(["show", unit]);
+    let output = cmd.output().map_err(|e| ServiceError(e.to_string()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(ServiceError(stderr.trim().to_owned()));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(parse_unit_show(&stdout, unit))
+}
+
+fn parse_unit_show(show_output: &str, unit: &str) -> UnitDetail {
+    let mut detail = UnitDetail {
+        name: unit.to_owned(),
+        ..Default::default()
+    };
+    for line in show_output.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key {
+            "Description" => detail.description = value.to_owned(),
+            "LoadState" => detail.load_state = value.to_owned(),
+            "ActiveState" => detail.active_state = value.to_owned(),
+            "SubState" => detail.sub_state = value.to_owned(),
+            "MainPID" => detail.main_pid = value.parse().ok(),
+            "ExecStart" => detail.exec_start = value.to_owned(),
+            "FragmentPath" => detail.fragment_path = value.to_owned(),
+            "ActiveEnterTimestamp" => detail.active_enter_timestamp = value.to_owned(),
+            "NRestarts" => detail.n_restarts = value.parse().ok(),
+            "MemoryCurrent" => {
+                if value != "[not set]" && value != "0" {
+                    detail.memory_current = value.parse().ok();
+                }
+            }
+            "CPUUsageNSec" => {
+                if value != "[not set]" {
+                    detail.cpu_usage_nsec = value.parse().ok();
+                }
+            }
+            "TasksCurrent" => {
+                if value != "[not set]" && value != "18446744073709551615" {
+                    detail.tasks_current = value.parse().ok();
+                }
+            }
+            "Wants" => {
+                detail.wants = value.split_whitespace().map(str::to_owned).collect();
+            }
+            "Requires" => {
+                detail.requires = value.split_whitespace().map(str::to_owned).collect();
+            }
+            "WantedBy" => {
+                detail.wanted_by = value.split_whitespace().map(str::to_owned).collect();
+            }
+            _ => {}
+        }
+    }
+    detail
+}
+
+fn format_unit_detail(detail: &UnitDetail) -> String {
+    let mut lines = vec![detail.name.clone()];
+    if !detail.description.is_empty() {
+        lines.push(format!("├── description: {}", detail.description));
+    }
+    lines.push(format!(
+        "├── state: load={} active={} sub={}",
+        detail.load_state, detail.active_state, detail.sub_state
+    ));
+    if let Some(pid) = detail.main_pid {
+        if pid > 0 {
+            lines.push(format!("├── main-pid: {pid}"));
+        }
+    }
+    if !detail.exec_start.is_empty() {
+        lines.push(format!("├── exec-start: {}", detail.exec_start));
+    }
+    if !detail.fragment_path.is_empty() {
+        lines.push(format!("├── fragment: {}", detail.fragment_path));
+    }
+    if !detail.active_enter_timestamp.is_empty() {
+        lines.push(format!(
+            "├── active-since: {}",
+            detail.active_enter_timestamp
+        ));
+    }
+    if let Some(restarts) = detail.n_restarts {
+        if restarts > 0 {
+            lines.push(format!("├── restarts: {restarts}"));
+        }
+    }
+    if let Some(mem) = detail.memory_current {
+        lines.push(format!("├── memory: {}", human_bytes(mem)));
+    }
+    if let Some(cpu_ns) = detail.cpu_usage_nsec {
+        let cpu_secs = cpu_ns as f64 / 1_000_000_000.0;
+        lines.push(format!("├── cpu-time: {cpu_secs:.2}s"));
+    }
+    if let Some(tasks) = detail.tasks_current {
+        lines.push(format!("├── tasks: {tasks}"));
+    }
+    if !detail.wants.is_empty() {
+        lines.push(format!("├── wants: {}", detail.wants.join(", ")));
+    }
+    if !detail.requires.is_empty() {
+        lines.push(format!("├── requires: {}", detail.requires.join(", ")));
+    }
+    if !detail.wanted_by.is_empty() {
+        lines.push(format!("└── wanted-by: {}", detail.wanted_by.join(", ")));
+    } else if lines.last().map(|l| l.starts_with("├──")).unwrap_or(false) {
+        // Fix the last ├── to └──
+        if let Some(last) = lines.last_mut() {
+            *last = last.replacen("├──", "└──", 1);
+        }
+    }
+    lines.join("\n")
+}
+
+fn human_bytes(b: u64) -> String {
+    if b >= 1024 * 1024 * 1024 {
+        format!("{:.2}GB", b as f64 / 1024.0 / 1024.0 / 1024.0)
+    } else if b >= 1024 * 1024 {
+        format!("{:.1}MB", b as f64 / 1024.0 / 1024.0)
+    } else if b >= 1024 {
+        format!("{:.1}KB", b as f64 / 1024.0)
+    } else {
+        format!("{b}B")
+    }
 }
 
 fn parse_options(flags: ServiceFlags) -> Result<ServiceOptions, ServiceError> {
@@ -473,6 +640,7 @@ mod tests {
             failed: false,
             all: false,
             filter: None,
+            unit: None,
         })
         .unwrap_err();
 
@@ -512,5 +680,81 @@ mod tests {
             format_default_report(&[], &[], Some("unbound")),
             "No services matched 'unbound'."
         );
+    }
+
+    #[test]
+    fn parse_unit_show_extracts_fields() {
+        let show_output = "Id=nginx.service\n\
+Description=The NGINX HTTP and reverse proxy server\n\
+LoadState=loaded\n\
+ActiveState=active\n\
+SubState=running\n\
+MainPID=1234\n\
+ExecStart={ path=/usr/sbin/nginx ; argv[]=nginx -g 'daemon off;' }\n\
+FragmentPath=/usr/lib/systemd/system/nginx.service\n\
+ActiveEnterTimestamp=Mon 2026-01-15 14:23:01 UTC\n\
+NRestarts=3\n\
+MemoryCurrent=8388608\n\
+CPUUsageNSec=5000000000\n\
+TasksCurrent=5\n\
+Wants=network.target\n\
+Requires=\n\
+WantedBy=multi-user.target\n";
+        let detail = parse_unit_show(show_output, "nginx.service");
+        assert_eq!(detail.name, "nginx.service");
+        assert_eq!(
+            detail.description,
+            "The NGINX HTTP and reverse proxy server"
+        );
+        assert_eq!(detail.load_state, "loaded");
+        assert_eq!(detail.active_state, "active");
+        assert_eq!(detail.sub_state, "running");
+        assert_eq!(detail.main_pid, Some(1234));
+        assert!(detail.exec_start.contains("nginx"));
+        assert_eq!(
+            detail.fragment_path,
+            "/usr/lib/systemd/system/nginx.service"
+        );
+        assert_eq!(detail.n_restarts, Some(3));
+        assert_eq!(detail.memory_current, Some(8388608));
+        assert_eq!(detail.cpu_usage_nsec, Some(5_000_000_000));
+        assert_eq!(detail.tasks_current, Some(5));
+        assert_eq!(detail.wants, vec!["network.target"]);
+        assert_eq!(detail.wanted_by, vec!["multi-user.target"]);
+    }
+
+    #[test]
+    fn format_unit_detail_renders_all_fields() {
+        let detail = UnitDetail {
+            name: "nginx.service".to_owned(),
+            description: "NGINX server".to_owned(),
+            load_state: "loaded".to_owned(),
+            active_state: "active".to_owned(),
+            sub_state: "running".to_owned(),
+            main_pid: Some(1234),
+            exec_start: "nginx -g 'daemon off;'".to_owned(),
+            fragment_path: "/usr/lib/systemd/system/nginx.service".to_owned(),
+            active_enter_timestamp: "Mon 2026-01-15 14:23:01 UTC".to_owned(),
+            n_restarts: Some(3),
+            memory_current: Some(8388608),
+            cpu_usage_nsec: Some(5_000_000_000),
+            tasks_current: Some(5),
+            wants: vec!["network.target".to_owned()],
+            requires: vec![],
+            wanted_by: vec!["multi-user.target".to_owned()],
+        };
+        let out = format_unit_detail(&detail);
+        assert!(out.contains("nginx.service"));
+        assert!(out.contains("description: NGINX server"));
+        assert!(out.contains("state: load=loaded active=active sub=running"));
+        assert!(out.contains("main-pid: 1234"));
+        assert!(out.contains("exec-start: nginx"));
+        assert!(out.contains("fragment: /usr/lib/systemd/system/nginx.service"));
+        assert!(out.contains("restarts: 3"));
+        assert!(out.contains("memory: 8.0MB"));
+        assert!(out.contains("cpu-time: 5.00s"));
+        assert!(out.contains("tasks: 5"));
+        assert!(out.contains("wants: network.target"));
+        assert!(out.contains("wanted-by: multi-user.target"));
     }
 }

@@ -115,6 +115,8 @@ pub enum Commands {
         no_pid: bool,
         #[arg(long, help = "Disable ANSI color output")]
         no_color: bool,
+        #[arg(long, help = "Show cmdline, RSS memory, thread count per process")]
+        verbose: bool,
     },
     #[command(about = "Show processes holding a file, device, or port")]
     Holds {
@@ -161,6 +163,9 @@ pub enum Commands {
     },
     #[command(about = "Inspect systemd services (read-only)")]
     Service {
+        /// Optional unit name to show detailed info (MainPID, ExecStart, etc.)
+        #[arg(value_name = "UNIT")]
+        unit: Option<String>,
         #[arg(long, conflicts_with = "user", help = "Inspect system services")]
         system: bool,
         #[arg(long, help = "Inspect user services")]

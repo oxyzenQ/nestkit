@@ -43,6 +43,12 @@ pub fn format_report(
             owner_count,
             plural(owner_count, "owner", "owners")
         ));
+        // State breakdown for TCP sockets — investigators want to see at a
+        // glance "5 LISTEN · 12 ESTABLISHED · 3 TIME_WAIT".
+        let state_breakdown = state_breakdown(sockets);
+        if !state_breakdown.is_empty() {
+            lines.push(format!("states: {state_breakdown}"));
+        }
     }
 
     append_note(&mut lines, stats);
@@ -227,24 +233,59 @@ fn format_socket(socket: &SocketEntry) -> String {
     } else {
         format!("{}:{}", socket.address, socket.port)
     };
-    let mut value = format!("{} {}", socket.protocol.label(), endpoint,);
+    let mut value = format!("{} {}", socket.protocol.label(), endpoint);
     if let Some(state) = &socket.state {
         value.push(' ');
         value.push_str(state);
+    }
+    // Show remote endpoint when non-zero (i.e., connection is established or
+    // has a peer — LISTEN sockets have 0.0.0.0:0).
+    if socket.remote_port != 0 {
+        let remote = if socket.remote_address.contains(':') {
+            format!("[{}]:{}", socket.remote_address, socket.remote_port)
+        } else {
+            format!("{}:{}", socket.remote_address, socket.remote_port)
+        };
+        value.push_str(&format!(" <- {remote}"));
     }
     value
 }
 
 pub fn format_owner(process: &ProcessInfo, no_pid: bool) -> String {
-    if no_pid {
-        format!("{} user={}", process.name, process.user)
-    } else {
-        format!("{} pid={} user={}", process.name, process.pid, process.user)
+    let mut parts = Vec::new();
+    parts.push(process.name.clone());
+    if !no_pid {
+        parts.push(format!("pid={}", process.pid));
     }
+    parts.push(format!("user={}", process.user));
+    if let Some(fd) = process.fd {
+        parts.push(format!("fd={fd}"));
+    }
+    parts.join(" ")
 }
 
 pub fn format_unknown_owner() -> &'static str {
     "unknown"
+}
+
+/// Build a "5 LISTEN · 12 ESTABLISHED · 3 TIME_WAIT" style summary of TCP
+/// socket states. Returns empty string when no TCP sockets have a state.
+fn state_breakdown(sockets: &[SocketEntry]) -> String {
+    use std::collections::BTreeMap;
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for socket in sockets {
+        if let Some(state) = socket.state.as_deref() {
+            *counts.entry(state).or_default() += 1;
+        }
+    }
+    // Sort by count descending for the most useful states first
+    let mut entries: Vec<(&&str, &usize)> = counts.iter().collect();
+    entries.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    entries
+        .iter()
+        .map(|(state, count)| format!("{count} {state}"))
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 pub fn should_show_unreadable_note(stats: &ScanStats) -> bool {
@@ -293,6 +334,8 @@ mod tests {
             port,
             state: state.map(ToOwned::to_owned),
             inode,
+            remote_address: "0.0.0.0".to_owned(),
+            remote_port: 0,
         }
     }
 
@@ -315,6 +358,8 @@ mod tests {
             name: name.to_owned(),
             user: "rezky".to_owned(),
             cwd: None,
+            cmdline: None,
+            fd: None,
         }
     }
 

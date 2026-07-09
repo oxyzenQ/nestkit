@@ -26,6 +26,8 @@ pub struct SocketEntry {
     pub protocol: Protocol,
     pub address: String,
     pub port: u16,
+    pub remote_address: String,
+    pub remote_port: u16,
     pub state: Option<String>,
     pub inode: u64,
 }
@@ -36,6 +38,8 @@ pub struct ProcessInfo {
     pub name: String,
     pub user: String,
     pub cwd: Option<PathBuf>,
+    pub cmdline: Option<String>,
+    pub fd: Option<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

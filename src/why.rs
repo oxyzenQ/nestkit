@@ -198,13 +198,13 @@ fn summarize_path_evidence(holders: &[Holder]) -> &'static str {
         holder
             .evidence
             .iter()
-            .any(|evidence| matches!(evidence, Evidence::Fd(_)))
+            .any(|evidence| matches!(evidence, Evidence::Fd(_, _)))
     });
     let has_mmap = holders.iter().any(|holder| {
         holder
             .evidence
             .iter()
-            .any(|evidence| matches!(evidence, Evidence::Mmap))
+            .any(|evidence| matches!(evidence, Evidence::Mmap(_)))
     });
 
     match (has_fd, has_mmap) {
@@ -315,7 +315,11 @@ mod tests {
     fn renders_path_reason_with_holder_evidence() {
         let output = format_path_holder_reason(
             "/tmp/example",
-            &[holder(1234, "nano", vec![Evidence::Fd(12)])],
+            &[holder(
+                1234,
+                "nano",
+                vec![Evidence::Fd(12, holds::FdMode::Read)],
+            )],
             &quiet_stats(),
         );
 
@@ -436,7 +440,11 @@ mod tests {
         };
         let output = format_path_holder_reason(
             "/tmp/example",
-            &[holder(1234, "nano", vec![Evidence::Fd(12)])],
+            &[holder(
+                1234,
+                "nano",
+                vec![Evidence::Fd(12, holds::FdMode::Read)],
+            )],
             &stats,
         );
 
@@ -455,8 +463,17 @@ mod tests {
         let output = format_path_holder_reason(
             "/tmp/example",
             &[
-                holder(1111, "nano", vec![Evidence::Fd(4)]),
-                holder(2222, "vim", vec![Evidence::Mmap]),
+                holder(1111, "nano", vec![Evidence::Fd(4, holds::FdMode::Read)]),
+                holder(
+                    2222,
+                    "vim",
+                    vec![Evidence::Mmap(holds::MmapPerms {
+                        read: true,
+                        write: false,
+                        execute: false,
+                        private: true,
+                    })],
+                ),
             ],
             &quiet_stats(),
         );
